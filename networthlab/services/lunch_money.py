@@ -3,6 +3,7 @@
 from datetime import date, timedelta
 from decimal import Decimal
 
+import httpx
 from lunchable import LunchMoney
 
 from networthlab.models.accounts import Account, AccountType, RecurringItem, Transaction
@@ -32,51 +33,74 @@ class LunchMoneyService:
         "mortgage": AccountType.LOAN,
         "student": AccountType.LOAN,
         "auto": AccountType.LOAN,
+        # Plaid types
+        "depository": AccountType.CASH,
+        "credit": AccountType.CREDIT,
+        "loan": AccountType.LOAN,
+        "investment": AccountType.INVESTMENT,
     }
 
     def __init__(self, access_token: str):
         """Initialize with Lunch Money access token."""
         self.client = LunchMoney(access_token=access_token)
+        self.access_token = access_token
 
     def get_accounts(self) -> list[Account]:
         """Fetch all accounts (assets + plaid accounts)."""
         accounts = []
 
         # Get manual assets
-        assets = self.client.get_assets()
-        for asset in assets:
-            account_type = self._map_type(asset.type_name, asset.subtype_name)
-            accounts.append(
-                Account(
-                    id=asset.id,
-                    name=asset.display_name or asset.name,
-                    type=account_type,
-                    subtype=asset.subtype_name,
-                    balance=Decimal(str(asset.balance)),
-                    currency=asset.currency,
-                    institution=asset.institution_name,
-                    source="asset",
+        try:
+            assets = self.client.get_assets()
+            for asset in assets:
+                account_type = self._map_type(asset.type_name, asset.subtype_name)
+                accounts.append(
+                    Account(
+                        id=asset.id,
+                        name=asset.display_name or asset.name,
+                        type=account_type,
+                        subtype=asset.subtype_name,
+                        balance=Decimal(str(asset.balance)),
+                        currency=asset.currency,
+                        institution=asset.institution_name,
+                        source="asset",
+                    )
                 )
-            )
+        except Exception as e:
+            print(f"Warning: Failed to fetch assets: {e}")
 
-        # Get Plaid-linked accounts
-        plaid_accounts = self.client.get_plaid_accounts()
-        for plaid in plaid_accounts:
-            account_type = self._map_type(plaid.type, plaid.subtype)
-            accounts.append(
-                Account(
-                    id=plaid.id,
-                    name=plaid.display_name or plaid.name,
-                    type=account_type,
-                    subtype=plaid.subtype,
-                    balance=Decimal(str(plaid.balance)),
-                    currency=plaid.currency,
-                    institution=plaid.institution_name,
-                    source="plaid",
+        # Get Plaid-linked accounts via direct API call to handle None subtypes
+        try:
+            plaid_accounts = self._fetch_plaid_accounts_raw()
+            for plaid in plaid_accounts:
+                account_type = self._map_type(plaid.get("type"), plaid.get("subtype"))
+                balance = plaid.get("balance", 0)
+                accounts.append(
+                    Account(
+                        id=plaid["id"],
+                        name=plaid.get("display_name") or plaid.get("name", "Unknown"),
+                        type=account_type,
+                        subtype=plaid.get("subtype"),
+                        balance=Decimal(str(balance)) if balance else Decimal(0),
+                        currency=plaid.get("currency", "USD"),
+                        institution=plaid.get("institution_name"),
+                        source="plaid",
+                    )
                 )
-            )
+        except Exception as e:
+            print(f"Warning: Failed to fetch Plaid accounts: {e}")
 
         return accounts
+
+    def _fetch_plaid_accounts_raw(self) -> list[dict]:
+        """Fetch Plaid accounts directly via API to avoid validation issues."""
+        response = httpx.get(
+            "https://dev.lunchmoney.app/v1/plaid_accounts",
+            headers={"Authorization": f"Bearer {self.access_token}"},
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("plaid_accounts", [])
 
     def get_transactions(
         self, start_date: date | None = None, end_date: date | None = None
