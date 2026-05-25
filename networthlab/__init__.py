@@ -1,1 +1,1 @@
-"""NetWorthLab - Personal financial projection app."""
+"""NetWorthLab - Financial planning webapp."""

@@ -2,24 +2,29 @@ import reflex as rx
 
 config = rx.Config(
     app_name="networthlab",
+    frontend_port=8388,
     tailwind={
+        "darkMode": "class",
         "theme": {
             "extend": {
                 "colors": {
-                    "primary": {
-                        "50": "#f0fdf4",
-                        "100": "#dcfce7",
-                        "200": "#bbf7d0",
-                        "300": "#86efac",
-                        "400": "#4ade80",
-                        "500": "#22c55e",
-                        "600": "#16a34a",
-                        "700": "#15803d",
-                        "800": "#166534",
-                        "900": "#14532d",
+                    "bg": {
+                        "primary": "#0f0f14",
+                        "secondary": "#1a1a24",
+                        "tertiary": "#252532",
+                    },
+                    "accent": {
+                        "primary": "#8b5cf6",
+                        "secondary": "#3b82f6",
+                        "success": "#10b981",
+                        "warning": "#f59e0b",
+                        "danger": "#ef4444",
                     },
                 },
-            },
+                "backdropBlur": {
+                    "xl": "24px",
+                },
+            }
         },
     },
 )

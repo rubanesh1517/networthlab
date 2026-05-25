@@ -1,198 +1,208 @@
-"""Financial calculations for projections."""
+"""Financial calculation utilities."""
 
-from datetime import date, timedelta
-from decimal import Decimal
-
-from networthlab.models.projections import FIREResult, FinancialSnapshot, LoanPayoffResult, Projection
-from networthlab.models.settings import UserSettings
+import math
 
 
-def calculate_fire(
-    current_investments: Decimal,
-    annual_savings: Decimal,
-    annual_expenses: Decimal,
-    expected_return: float = 0.07,
-    withdrawal_rate: float = 0.04,
-    inflation_rate: float = 0.03,
-    max_years: int = 50,
-) -> FIREResult:
+def calculate_compound_interest(
+    principal: float,
+    annual_rate: float,
+    years: int,
+    monthly_contribution: float = 0,
+    compounds_per_year: int = 12,
+) -> float:
     """
-    Calculate years to Financial Independence.
+    Calculate compound interest with optional monthly contributions.
 
-    FIRE Number = Annual Expenses / Safe Withdrawal Rate
-    Then compound investments until they reach the inflation-adjusted FIRE number.
+    Args:
+        principal: Initial investment amount
+        annual_rate: Annual interest rate as percentage (e.g., 7.0 for 7%)
+        years: Number of years
+        monthly_contribution: Monthly contribution amount
+        compounds_per_year: Number of times interest compounds per year
+
+    Returns:
+        Final balance after compounding
+    """
+    rate = annual_rate / 100
+    n = compounds_per_year
+    t = years
+
+    # Future value of principal
+    fv_principal = principal * (1 + rate / n) ** (n * t)
+
+    # Future value of monthly contributions (annuity)
+    if monthly_contribution > 0 and rate > 0:
+        monthly_rate = rate / 12
+        months = years * 12
+        fv_contributions = monthly_contribution * (((1 + monthly_rate) ** months - 1) / monthly_rate)
+    else:
+        fv_contributions = monthly_contribution * years * 12
+
+    return fv_principal + fv_contributions
+
+
+def calculate_fire_number(
+    annual_expenses: float,
+    withdrawal_rate: float = 4.0,
+) -> float:
+    """
+    Calculate the FIRE number (amount needed to retire).
+
+    Args:
+        annual_expenses: Annual expenses in retirement
+        withdrawal_rate: Safe withdrawal rate as percentage (default 4%)
+
+    Returns:
+        FIRE number (target net worth for retirement)
     """
     if withdrawal_rate <= 0:
-        withdrawal_rate = 0.04
+        return 0.0
+    return annual_expenses / (withdrawal_rate / 100)
 
-    fire_number = annual_expenses / Decimal(withdrawal_rate)
-    investments = current_investments
 
-    # Check if already FIRE
-    if investments >= fire_number:
-        return FIREResult(
-            fire_number=fire_number,
-            current_investments=current_investments,
-            annual_expenses=annual_expenses,
-            years_to_fire=0,
-            fire_year=date.today().year,
-            fire_progress=1.0,
-        )
+def calculate_years_to_fire(
+    current_portfolio: float,
+    fire_number: float,
+    monthly_contribution: float,
+    annual_return: float = 7.0,
+) -> int:
+    """
+    Calculate years until FIRE is achieved.
 
-    for year in range(1, max_years + 1):
-        # Grow investments
-        investments = investments * Decimal(1 + expected_return) + annual_savings
+    Args:
+        current_portfolio: Current investment portfolio value
+        fire_number: Target FIRE number
+        monthly_contribution: Monthly investment contribution
+        annual_return: Expected annual return as percentage
 
-        # Adjust FIRE number for inflation
-        adjusted_fire = fire_number * Decimal(1 + inflation_rate) ** year
+    Returns:
+        Number of years until FIRE
+    """
+    if fire_number <= current_portfolio:
+        return 0
 
-        if investments >= adjusted_fire:
-            return FIREResult(
-                fire_number=fire_number,
-                current_investments=current_investments,
-                annual_expenses=annual_expenses,
-                years_to_fire=year,
-                fire_year=date.today().year + year,
-                fire_progress=min(1.0, float(current_investments / fire_number)),
-            )
+    monthly_rate = annual_return / 100 / 12
+    current = current_portfolio
+    years = 0
 
-    # Not achievable within max_years
-    return FIREResult(
-        fire_number=fire_number,
-        current_investments=current_investments,
-        annual_expenses=annual_expenses,
-        years_to_fire=-1,
-        fire_year=-1,
-        fire_progress=float(current_investments / fire_number) if fire_number > 0 else 0.0,
-    )
+    while current < fire_number and years < 100:
+        for _ in range(12):
+            current = current * (1 + monthly_rate) + monthly_contribution
+        years += 1
+
+    return years
 
 
 def calculate_loan_payoff(
-    account_id: int,
-    account_name: str,
-    balance: Decimal,
+    principal: float,
     annual_rate: float,
-    monthly_payment: Decimal,
-    extra_payment: Decimal = Decimal(0),
-) -> LoanPayoffResult:
+    monthly_payment: float,
+) -> dict:
     """
-    Calculate loan payoff timeline using amortization.
+    Calculate loan payoff details.
 
-    Returns months to payoff and total interest paid.
+    Args:
+        principal: Original loan amount
+        annual_rate: Annual interest rate as percentage
+        monthly_payment: Monthly payment amount
+
+    Returns:
+        Dictionary with payoff details including months, total_interest, total_paid
     """
-    if balance <= 0:
-        return LoanPayoffResult(
-            account_id=account_id,
-            account_name=account_name,
-            current_balance=balance,
-            interest_rate=annual_rate,
-            monthly_payment=monthly_payment,
-            months_to_payoff=0,
-            payoff_date=date.today(),
-            total_interest=Decimal(0),
-        )
+    if monthly_payment <= 0 or principal <= 0:
+        return {
+            "months": 0,
+            "total_interest": 0,
+            "total_paid": 0,
+            "schedule": [],
+        }
 
-    monthly_rate = Decimal(annual_rate / 12)
-    remaining = balance
-    months = 0
-    total_interest = Decimal(0)
-    total_payment = monthly_payment + extra_payment
+    monthly_rate = annual_rate / 100 / 12
 
-    while remaining > 0 and months < 360:  # 30 year cap
-        interest = remaining * monthly_rate
-        total_interest += interest
-        principal = total_payment - interest
+    if monthly_rate <= 0:
+        months = math.ceil(principal / monthly_payment)
+        return {
+            "months": months,
+            "total_interest": 0,
+            "total_paid": principal,
+            "schedule": [],
+        }
 
-        if principal <= 0:
-            # Payment doesn't cover interest - loan will never be paid off
-            return LoanPayoffResult(
-                account_id=account_id,
-                account_name=account_name,
-                current_balance=balance,
-                interest_rate=annual_rate,
-                monthly_payment=monthly_payment,
-                months_to_payoff=-1,
-                payoff_date=date.today(),
-                total_interest=Decimal(-1),
-            )
+    # Check if payment is too low
+    if monthly_payment <= principal * monthly_rate:
+        return {
+            "months": -1,  # Indicates payment too low
+            "total_interest": float("inf"),
+            "total_paid": float("inf"),
+            "schedule": [],
+        }
 
-        remaining = max(Decimal(0), remaining - principal)
-        months += 1
-
-    payoff_date = date.today() + timedelta(days=months * 30)
-
-    return LoanPayoffResult(
-        account_id=account_id,
-        account_name=account_name,
-        current_balance=balance,
-        interest_rate=annual_rate,
-        monthly_payment=monthly_payment,
-        months_to_payoff=months,
-        payoff_date=payoff_date,
-        total_interest=total_interest,
+    # Calculate months to payoff
+    months = math.ceil(
+        math.log(monthly_payment / (monthly_payment - principal * monthly_rate))
+        / math.log(1 + monthly_rate)
     )
 
+    # Generate amortization schedule
+    schedule = []
+    balance = principal
+    total_interest = 0
+    total_paid = 0
 
-def project_net_worth(
-    snapshot: FinancialSnapshot,
-    settings: UserSettings,
-    years: int | None = None,
-) -> list[Projection]:
+    for month in range(1, months + 1):
+        interest = balance * monthly_rate
+        principal_payment = min(monthly_payment - interest, balance)
+        balance = max(0, balance - principal_payment)
+
+        total_interest += interest
+        total_paid += interest + principal_payment
+
+        schedule.append({
+            "month": month,
+            "payment": monthly_payment if balance > 0 else principal_payment + interest,
+            "principal": principal_payment,
+            "interest": interest,
+            "balance": balance,
+        })
+
+        if balance <= 0:
+            break
+
+    return {
+        "months": len(schedule),
+        "total_interest": round(total_interest, 2),
+        "total_paid": round(total_paid, 2),
+        "schedule": schedule,
+    }
+
+
+def calculate_monthly_payment(
+    principal: float,
+    annual_rate: float,
+    term_months: int,
+) -> float:
     """
-    Project net worth year by year.
+    Calculate monthly payment for a loan.
 
-    Assumptions:
-    - Investments grow at expected_return rate
-    - Savings continue at current rate
-    - Loans decrease based on current payment patterns
+    Args:
+        principal: Loan principal amount
+        annual_rate: Annual interest rate as percentage
+        term_months: Loan term in months
+
+    Returns:
+        Monthly payment amount
     """
-    if years is None:
-        years = settings.projection_years
+    if term_months <= 0 or principal <= 0:
+        return 0.0
 
-    projections = []
-    investments = snapshot.investments
-    annual_savings = snapshot.monthly_savings * 12
+    if annual_rate <= 0:
+        return principal / term_months
 
-    # Calculate FIRE number for progress tracking
-    annual_expenses = snapshot.monthly_expenses * 12
-    if settings.safe_withdrawal_rate > 0:
-        fire_number = annual_expenses / Decimal(settings.safe_withdrawal_rate)
-    else:
-        fire_number = Decimal(0)
+    monthly_rate = annual_rate / 100 / 12
 
-    # Estimate loan payoff (simplified: assume 5% of balance paid per year)
-    current_loans = snapshot.loans
+    payment = principal * (
+        (monthly_rate * (1 + monthly_rate) ** term_months)
+        / ((1 + monthly_rate) ** term_months - 1)
+    )
 
-    for year in range(1, years + 1):
-        # Compound investment growth
-        investments = investments * Decimal(1 + settings.expected_return) + annual_savings
-
-        # Decrease loans (simplified linear model)
-        loan_balance = max(Decimal(0), current_loans - (current_loans * Decimal("0.1") * year))
-
-        # Calculate net worth
-        net_worth = (
-            investments
-            + snapshot.cash
-            + snapshot.real_estate
-            + snapshot.crypto
-            + snapshot.other_assets
-            - loan_balance
-            - snapshot.credit
-            - snapshot.other_liabilities
-        )
-
-        # Calculate FIRE progress
-        fire_progress = min(1.0, float(investments / fire_number)) if fire_number > 0 else 0.0
-
-        projections.append(
-            Projection(
-                year=date.today().year + year,
-                net_worth=net_worth,
-                investments=investments,
-                loan_balance=loan_balance,
-                fire_progress=fire_progress,
-            )
-        )
-
-    return projections
+    return round(payment, 2)

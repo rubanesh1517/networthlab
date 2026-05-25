@@ -55,3 +55,6 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Brainstorming sessions (Superpowers visual companion)
+.superpowers/

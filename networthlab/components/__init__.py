@@ -1,1 +1,1 @@
-"""Reusable UI components."""
+"""Components package."""
