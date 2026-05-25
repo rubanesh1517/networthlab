@@ -127,8 +127,8 @@ Loaded from `~/.networthlab/` (matches existing `services/storage.py` pattern). 
 
 ```yaml
 groups:
-  - name: "52 Narbonne"
-    match: { nicknames: ["SM Non Reg", "*Narbonne*"] }
+  - name: "Custom Group"            # placeholder — replace with your own bucket
+    match: { nicknames: ["*Nickname Pattern*"] }
     icon: "home"
   - name: Retirement
     match: { types: [RRSP, LIRA, RRIF] }
@@ -144,7 +144,7 @@ groups:
     icon: "trending-up"
 ```
 
-Unmatched accounts fall into "Other" with a yellow chip prompting the user to add a rule. Pattern syntax for nicknames is glob (`*Narbonne*`).
+Unmatched accounts fall into "Other" with a yellow chip prompting the user to add a rule. Pattern syntax for nicknames is glob (e.g., `*Pattern*` matches any nickname containing "Pattern").
 
 A committed `config/account_groups.example.yaml` documents the structure with placeholder values only.
 
@@ -475,7 +475,7 @@ Single reusable in-page modal (Reflex `rx.dialog`, `components/exposure/drilldow
 | Keyring session missing/expired | Banner: "Run `lunchsimple login` to connect." Page body hidden. |
 | `ws_api` network failure | Toast error + render `positions_cache.json` snapshot if any; "stale by Xm" badge on KPI bar. |
 | `yfinance` failure for one symbol | That symbol marked unclassified on affected dimensions; other tiles render normally; yellow chip on affected tiles. |
-| All `yfinance` calls fail | Geography for ETFs still works via name-pattern + stock-exchange-aggregation when top_holdings is cached; otherwise geography falls back to listing exchange. Asset class and sector are sourced from overrides where available, otherwise marked unclassified. Warning banner shown. |
+| All `yfinance` calls fail | **ETFs:** geography uses overrides → name-pattern → top_holdings exchange aggregation (only if cached top_holdings is available); otherwise Unclassified. Listing-exchange fallback is **NOT** used for ETFs — that would misreport TSX-listed VEQT as 100% Canada. Asset class and sector use overrides where available, otherwise Unclassified. **Non-ETF holdings:** asset_class from WS security_type, sector from override or Unclassified, geography from listing exchange. Warning banner shown either way. |
 | Empty portfolio | Empty state: "No positions found in your Wealthsimple accounts." |
 | YAML parse error | Banner with file path + parser exception message; page falls back to no-config defaults. |
 | Missing `account_groups.yaml` | Banner linking to `config/account_groups.example.yaml`; all accounts grouped as "Other". |
@@ -547,7 +547,7 @@ Unit tests for the pure-aggregation surface and for the look-through algorithm.
   - Stale-override detection (`as_of` > 180 days)
 - **Account grouping**:
   - Rule order (nickname before type)
-  - Glob nickname matches (`*Narbonne*` matches "Narbonne SM", "My Narbonne")
+  - Glob nickname matches (`*Pattern*` matches "Pattern SM", "My Pattern")
   - Type fallback when no nickname matches
   - Unmatched → "Other" + warning surfaced
   - Missing config file → "Other" for all accounts + banner warning
@@ -587,7 +587,7 @@ Designed for, not built in MVP:
 - **Time series / drift over time**: snapshot `ExposureSnapshot` daily to `~/.networthlab/exposure_history/YYYY-MM-DD.json`. New chart: dimension-over-time stacked area.
 - **Target allocation**: per-user `~/.networthlab/targets.yaml`. New tile: drift table + rebalance suggestions.
 - **Non-WS holdings**: merge Lunch Money investment assets as opaque positions with user-specified classifications.
-- **In-app override UI**: edit `security_overrides.yaml` from a modal rather than a text editor.
+- **In-app override UI**: edit `~/.networthlab/security_overrides.yaml` (user file, not the committed example) from a modal rather than a text editor.
 
 ---
 
