@@ -1,7 +1,8 @@
 """Loan tracking state management."""
 
-from typing import Any
 from datetime import datetime
+from typing import Any
+
 import reflex as rx
 from pydantic import BaseModel
 

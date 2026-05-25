@@ -1,12 +1,13 @@
 """Loan Tracker page."""
 
 import reflex as rx
-from ..components.layout.page_wrapper import page_wrapper
-from ..components.cards.stat_card import stat_card
+
 from ..components.cards.chart_card import chart_card
+from ..components.cards.stat_card import stat_card
 from ..components.charts.loan_timeline import loan_timeline_chart_dynamic
 from ..components.forms.loan_form import loan_form
-from ..state.loan_state import LoanState, Loan
+from ..components.layout.page_wrapper import page_wrapper
+from ..state.loan_state import Loan, LoanState
 from ..styles.theme import COLORS
 
 

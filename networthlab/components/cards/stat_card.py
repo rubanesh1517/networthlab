@@ -1,6 +1,7 @@
 """Stat card component with trend indicator."""
 
 import reflex as rx
+
 from ...styles.theme import COLORS
 
 
@@ -116,7 +117,7 @@ def stat_card(
         backdrop_filter="blur(24px)",
         border=f"1px solid {COLORS['glass_border']}",
         _hover={
-            "border": f"1px solid rgba(139, 92, 246, 0.3)",
+            "border": "1px solid rgba(139, 92, 246, 0.3)",
             "transform": "translateY(-2px)",
         },
         transition="all 0.2s ease",

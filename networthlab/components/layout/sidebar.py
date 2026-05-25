@@ -1,6 +1,7 @@
 """Collapsible sidebar navigation component."""
 
 import reflex as rx
+
 from ...styles.theme import COLORS, GRADIENTS
 
 

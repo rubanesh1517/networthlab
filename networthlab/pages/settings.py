@@ -1,6 +1,7 @@
 """Settings page."""
 
 import reflex as rx
+
 from ..components.layout.page_wrapper import page_wrapper
 from ..state.app_state import AppState
 from ..styles.theme import COLORS

@@ -64,7 +64,11 @@ def test_security_classification_holds_four_dimensions():
         sector=breakdown,
         currency=breakdown,
         complexity_flag=None,
-        components=[ClassificationComponent(symbol="VEQT.TO", weight=Decimal("1.0"), source="unclassified")],
+        components=[
+            ClassificationComponent(
+                symbol="VEQT.TO", weight=Decimal("1.0"), source="unclassified"
+            )
+        ],
         fetched_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
     )
     assert sc.symbol == "VEQT.TO"

@@ -1,6 +1,7 @@
 """Scenario add/edit form component."""
 
 import reflex as rx
+
 from ...styles.theme import COLORS
 
 

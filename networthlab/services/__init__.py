@@ -1,8 +1,8 @@
 from .calculations import (
     calculate_compound_interest,
     calculate_fire_number,
-    calculate_years_to_fire,
     calculate_loan_payoff,
+    calculate_years_to_fire,
 )
 from .storage import Storage
 

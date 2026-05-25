@@ -1,6 +1,7 @@
 """Page layout wrapper component."""
 
 import reflex as rx
+
 from ...styles.theme import COLORS
 
 

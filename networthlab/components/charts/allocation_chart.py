@@ -1,7 +1,8 @@
 """Asset allocation donut chart component."""
 
 import reflex as rx
-from ...styles.theme import COLORS, CHART_COLORS
+
+from ...styles.theme import CHART_COLORS, COLORS
 
 
 def allocation_chart(

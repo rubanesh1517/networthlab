@@ -1,7 +1,8 @@
 """Loan payoff timeline stacked bar chart component."""
 
 import reflex as rx
-from ...styles.theme import COLORS, CHART_COLORS
+
+from ...styles.theme import CHART_COLORS, COLORS
 
 
 def loan_timeline_chart(

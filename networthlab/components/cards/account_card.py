@@ -1,8 +1,9 @@
 """Account display card component."""
 
 import reflex as rx
-from ...styles.theme import COLORS
+
 from ...state.app_state import Account
+from ...styles.theme import COLORS
 
 
 def account_card(account: Account) -> rx.Component:

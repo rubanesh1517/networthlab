@@ -2,20 +2,22 @@
 
 import reflex as rx
 
+from ..components.charts.allocation_chart import allocation_donut_simple
+from ..components.exposure.charts.concentration_bars import concentration_bars
+from ..components.exposure.charts.sector_bars import sector_bars
 from ..components.exposure.chips import (
     leverage_chip,
     review_complex_chip,
-    stale_cache_chip,
     stale_override_chip,
     unclassified_chip,
 )
-from ..components.exposure.charts.concentration_bars import concentration_bars
-from ..components.exposure.charts.sector_bars import sector_bars
+from ..components.exposure.chips import (
+    stale_cache_chip as _stale_cache_chip,
+)
 from ..components.exposure.drilldown_modal import drilldown_modal
 from ..components.exposure.exposure_tile import exposure_tile
 from ..components.exposure.kpi_bar import kpi_bar
 from ..components.layout.page_wrapper import page_wrapper
-from ..components.charts.allocation_chart import allocation_donut_simple
 from ..state.exposure_state import ExposureState
 from ..styles.theme import COLORS
 
@@ -54,7 +56,12 @@ def _empty_state() -> rx.Component:
 
 
 def _chip_strip(chip_types) -> rx.Component:
-    """Render per-tile chip list. Each chip type maps to a chip component."""
+    """Render per-tile chip list. Each chip type maps to a chip component.
+
+    Spec §9.5: all warning chips appear inline on tiles, including the
+    portfolio-wide signals (leverage / review_complex / stale_cache) — the
+    state populates them into every tile's chip list when applicable.
+    """
     return rx.hstack(
         rx.foreach(
             chip_types,
@@ -64,25 +71,11 @@ def _chip_strip(chip_types) -> rx.Component:
                 ("leverage", leverage_chip()),
                 ("review_complex", review_complex_chip()),
                 ("stale_override", stale_override_chip()),
+                ("stale_cache", _stale_cache_chip(ExposureState.cache_stale_minutes)),
                 rx.fragment(),
             ),
         ),
         spacing="1",
-    )
-
-
-def _page_chips() -> rx.Component:
-    return rx.hstack(
-        rx.cond(ExposureState.has_leverage, leverage_chip(), rx.fragment()),
-        rx.cond(ExposureState.has_review_complex, review_complex_chip(), rx.fragment()),
-        rx.cond(
-            # Spec §9.5: "Stale data" chip triggers when cache_stale_minutes > 60.
-            ExposureState.cache_stale_minutes > 60,
-            stale_cache_chip(ExposureState.cache_stale_minutes),
-            rx.fragment(),
-        ),
-        spacing="2",
-        margin_bottom="12px",
     )
 
 
@@ -163,7 +156,6 @@ def _body() -> rx.Component:
             _empty_state(),
             rx.fragment(
                 kpi_bar(),
-                _page_chips(),
                 _grid(),
                 drilldown_modal(),
             ),

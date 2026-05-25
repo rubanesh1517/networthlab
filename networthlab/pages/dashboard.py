@@ -1,12 +1,13 @@
 """Dashboard page - main overview of financial data."""
 
 import reflex as rx
-from ..components.layout.page_wrapper import page_wrapper
-from ..components.cards.stat_card import stat_card
-from ..components.cards.chart_card import chart_card
+
 from ..components.cards.account_card import account_card
-from ..components.charts.net_worth_chart import net_worth_chart
+from ..components.cards.chart_card import chart_card
+from ..components.cards.stat_card import stat_card
 from ..components.charts.allocation_chart import allocation_donut_simple
+from ..components.charts.net_worth_chart import net_worth_chart
+from ..components.layout.page_wrapper import page_wrapper
 from ..state.app_state import AppState
 from ..state.fire_state import FIREState
 from ..styles.theme import COLORS

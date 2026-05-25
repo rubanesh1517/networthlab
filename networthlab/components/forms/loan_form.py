@@ -1,6 +1,7 @@
 """Loan add/edit form component."""
 
 import reflex as rx
+
 from ...styles.theme import COLORS
 
 
@@ -34,7 +35,7 @@ def form_input(
             _focus={
                 "border": f"1px solid {COLORS['accent_primary']}",
                 "outline": "none",
-                "box_shadow": f"0 0 0 2px rgba(139, 92, 246, 0.2)",
+                "box_shadow": "0 0 0 2px rgba(139, 92, 246, 0.2)",
             },
             _placeholder={
                 "color": COLORS["text_secondary"],

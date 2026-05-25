@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from networthlab.models import DimensionBreakdown
 from networthlab.services.etf_lookthrough import EtfLookthroughService
 from networthlab.services.exposure_config import (
     SecurityOverride,
@@ -217,7 +216,7 @@ def fake_funds_data():
         }
 
         class FakeTopHoldings:
-            def to_dict(self_inner):
+            def to_dict(self):
                 return {}
 
         top_holdings = FakeTopHoldings()
@@ -260,7 +259,7 @@ def test_etf_provider_missing_fields_yields_unclassified(mocker, tmp_path):
         asset_classes = {}
 
         class FakeTopHoldings:
-            def to_dict(self_inner):
+            def to_dict(self):
                 return {}
 
         top_holdings = FakeTopHoldings()
@@ -342,7 +341,7 @@ def _make_fd(sector_weightings=None, asset_classes=None):
     FD.asset_classes = asset_classes or {}
 
     class TH:
-        def to_dict(self_inner):
+        def to_dict(self):
             return {}
 
     FD.top_holdings = TH()
@@ -435,12 +434,13 @@ def test_geography_name_pattern_us(mocker, tmp_path):
         asset_classes = {}
 
         class TH:
-            def to_dict(self_inner):
+            def to_dict(self):
                 return {}
 
         top_holdings = TH()
 
-    mocker.patch("networthlab.services.etf_lookthrough.yf.Ticker").return_value.funds_data = EmptyFD()
+    mock_ticker = mocker.patch("networthlab.services.etf_lookthrough.yf.Ticker")
+    mock_ticker.return_value.funds_data = EmptyFD()
 
     svc = EtfLookthroughService(
         overrides=SecurityOverrideBundle(stale_after_days=180, securities={}),
@@ -466,7 +466,7 @@ def test_geography_stock_exchange_aggregation(mocker, tmp_path):
         asset_classes = {}
 
         class TH:
-            def to_dict(self_inner):
+            def to_dict(self):
                 return {
                     "Holding Percent": {"NVDA": 0.10, "AAPL": 0.08, "MSFT": 0.07},
                     "exchange": {"NVDA": "NASDAQ", "AAPL": "NASDAQ", "MSFT": "NASDAQ"},
@@ -523,7 +523,7 @@ def test_geography_non_etf_uses_listing_exchange(tmp_path):
     assert nvda.geography.buckets == {"US": Decimal("1.0")}
 
 
-def test_etf_geography_listing_exchange_NOT_used_as_fallback(mocker, tmp_path):
+def test_etf_geography_listing_exchange_not_used_as_fallback(mocker, tmp_path):
     """Per spec §10: ETF with no override / no provider / no name match / no top_holdings
     must end up Unclassified — NOT default to its listing exchange country."""
 
@@ -532,7 +532,7 @@ def test_etf_geography_listing_exchange_NOT_used_as_fallback(mocker, tmp_path):
         asset_classes = {}
 
         class TH:
-            def to_dict(self_inner):
+            def to_dict(self):
                 return {}
 
         top_holdings = TH()
@@ -576,7 +576,7 @@ def test_cache_refetches_after_ttl_expires(mocker, tmp_path, fake_funds_data):
     mock_ticker.return_value.funds_data = fake_funds_data
 
     import json
-    from datetime import datetime, timedelta, timezone
+    from datetime import timedelta
 
     bundle = make_override_bundle("FAKE.TO", asset_class="provider", sector="provider")
     svc = EtfLookthroughService(overrides=bundle, complex_flags={}, cache_dir=tmp_path)

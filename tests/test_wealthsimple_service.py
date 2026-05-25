@@ -3,13 +3,12 @@
 import json
 from datetime import datetime, timezone
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 
 from networthlab.services.wealthsimple import (
     PositionsResult,
-    WealthsimpleAuthMissing,
+    WealthsimpleAuthError,
     WealthsimpleService,
 )
 
@@ -99,7 +98,7 @@ def test_fetch_positions_normalizes_and_writes_cache(mocker, tmp_path):
     assert call.args[1]["includeAccountData"] is True
 
 
-def test_fetch_positions_must_request_includeSecurity_flag(mocker, tmp_path):
+def test_fetch_positions_must_request_include_security_flag(mocker, tmp_path):
     mock_api = mocker.MagicMock()
     mock_api.get_accounts.return_value = []
     mock_api.get_token_info.return_value = {"identity_canonical_id": "id"}
@@ -143,7 +142,7 @@ def test_fetch_positions_raises_auth_missing_on_manual_login_required(mocker, tm
     )
     svc = WealthsimpleService(cache_dir=tmp_path)
     svc._session_override = mocker.MagicMock(access_token="x")
-    with pytest.raises(WealthsimpleAuthMissing) as exc_info:
+    with pytest.raises(WealthsimpleAuthError) as exc_info:
         svc.fetch_positions()
     assert "lunchsimple login" in str(exc_info.value)
 
@@ -157,7 +156,7 @@ def test_fetch_positions_raises_auth_missing_on_login_failed(mocker, tmp_path):
     )
     svc = WealthsimpleService(cache_dir=tmp_path)
     svc._session_override = mocker.MagicMock(access_token="x")
-    with pytest.raises(WealthsimpleAuthMissing):
+    with pytest.raises(WealthsimpleAuthError):
         svc.fetch_positions()
 
 
@@ -202,5 +201,5 @@ def test_fetch_positions_falls_back_to_cache_on_api_failure(mocker, tmp_path):
 def test_fetch_positions_raises_when_no_session(mocker, tmp_path):
     mocker.patch("networthlab.services.wealthsimple.keyring.get_password", return_value=None)
     svc = WealthsimpleService(cache_dir=tmp_path)
-    with pytest.raises(WealthsimpleAuthMissing):
+    with pytest.raises(WealthsimpleAuthError):
         svc.fetch_positions()

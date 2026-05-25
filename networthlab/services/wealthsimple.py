@@ -19,7 +19,7 @@ KEYRING_KEY = "session"
 CACHE_FILE_NAME = "positions_cache.json"
 
 
-class WealthsimpleAuthMissing(RuntimeError):
+class WealthsimpleAuthError(RuntimeError):
     """Raised when no session is available — UI should show a 'run lunchsimple login' banner."""
 
 
@@ -52,7 +52,7 @@ class WealthsimpleService:
     def fetch_positions(self) -> PositionsResult:
         session = self._session_override or self.load_session()
         if not session:
-            raise WealthsimpleAuthMissing(
+            raise WealthsimpleAuthError(
                 "No Wealthsimple session found in keyring — run `lunchsimple login`."
             )
 
@@ -81,7 +81,7 @@ class WealthsimpleService:
             )
         except (ManualLoginRequired, LoginFailedException) as exc:
             # Spec §10: surface auth banner, hide page body; NOT cache fallback.
-            raise WealthsimpleAuthMissing(
+            raise WealthsimpleAuthError(
                 f"Wealthsimple session expired or invalid — run "
                 f"`lunchsimple login` to reconnect: {exc}"
             ) from exc

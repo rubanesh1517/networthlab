@@ -1,7 +1,5 @@
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
-
-import pytest
 
 from networthlab.models import (
     ClassificationComponent,
@@ -132,9 +130,18 @@ def test_aggregate_unclassified_positions_attributed_to_unknown_bucket():
             asset_class=DimensionBreakdown(buckets={}, source="unclassified", as_of=None, notes=[]),
             sector=DimensionBreakdown(buckets={}, source="unclassified", as_of=None, notes=[]),
             geography=DimensionBreakdown(buckets={}, source="unclassified", as_of=None, notes=[]),
-            currency=DimensionBreakdown(buckets={"CAD": Decimal("1.0")}, source="heuristic", as_of=None, notes=[]),
+            currency=DimensionBreakdown(
+                buckets={"CAD": Decimal("1.0")},
+                source="heuristic",
+                as_of=None,
+                notes=[],
+            ),
             complexity_flag=None,
-            components=[ClassificationComponent(symbol="MYSTERY", weight=Decimal("1"), source="unclassified")],
+            components=[
+                ClassificationComponent(
+                    symbol="MYSTERY", weight=Decimal("1"), source="unclassified"
+                )
+            ],
             fetched_at=datetime.now(timezone.utc),
         )
     }

@@ -1,4 +1,3 @@
-from pathlib import Path
 
 from networthlab.models import Position
 from networthlab.services.exposure import build_account_groups

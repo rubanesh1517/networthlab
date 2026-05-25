@@ -494,7 +494,7 @@ No automatic retries in MVP — the manual refresh button is the recovery mechan
 
 `positions_cache.json` schema: `{"fetched_at": ISO8601, "positions": [...Position...]}`. File mtime drives the "stale by Xm" badge when used as fallback.
 
-`yfinance_cache.json` schema: `{"<symbol>": {"fetched_at": ISO8601, "data": <normalized SecurityClassification fields>}}`.
+`yfinance_cache.json` schema: each top-level key is a symbol; each value is `{"fetched_at": ISO8601, "funds_data": {...sector_weightings, asset_classes, top_holdings...}, "info": {...quoteType, sector, ...}}`. The cache stores the raw normalized yfinance snapshot rather than a `SecurityClassification` — classification runs fresh each load so changes to YAML overrides take effect without a cache invalidation. Either `funds_data` or `info` may be absent depending on which lookup path ran first for the symbol.
 
 ---
 

@@ -12,7 +12,7 @@ from networthlab.models.exposure import (
     Position,
     SecurityClassification,
 )
-from networthlab.models.projections import FIREResult, FinancialSnapshot, Projection
+from networthlab.models.projections import FinancialSnapshot, FIREResult, Projection
 from networthlab.models.settings import LoanSettings, UserSettings
 
 __all__ = [

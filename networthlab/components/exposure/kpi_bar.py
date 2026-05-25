@@ -9,7 +9,12 @@ from ...styles.theme import COLORS
 def _kpi_card(label: str, value, subtitle: rx.Component | None = None) -> rx.Component:
     """`value` may be a Reflex Var or a plain string/int; Reflex renders either."""
     return rx.box(
-        rx.text(label, font_size="11px", color=COLORS["text_secondary"], text_transform="uppercase"),
+        rx.text(
+            label,
+            font_size="11px",
+            color=COLORS["text_secondary"],
+            text_transform="uppercase",
+        ),
         rx.text(value, font_size="22px", font_weight="700", color=COLORS["text_primary"]),
         subtitle if subtitle is not None else rx.fragment(),
         padding="14px 18px",

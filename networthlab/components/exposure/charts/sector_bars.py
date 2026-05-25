@@ -2,7 +2,7 @@
 
 import reflex as rx
 
-from ....styles.theme import COLORS, CHART_COLORS
+from ....styles.theme import CHART_COLORS, COLORS
 
 
 def sector_bars(data: rx.Var, height: int = 240) -> rx.Component:

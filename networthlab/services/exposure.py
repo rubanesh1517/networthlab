@@ -54,7 +54,11 @@ def _dimension_rows(
                 source_account_id=pos.account_id,
                 underlying=None,
                 value_cad=pos.market_value_cad,
-                weight=(pos.market_value_cad / total_portfolio) if total_portfolio else Decimal("0"),
+                weight=(
+                    (pos.market_value_cad / total_portfolio)
+                    if total_portfolio
+                    else Decimal("0")
+                ),
                 source="unclassified",
             )
         ]

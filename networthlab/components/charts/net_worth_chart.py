@@ -1,7 +1,8 @@
 """Net worth area chart component."""
 
 import reflex as rx
-from ...styles.theme import COLORS, CHART_COLORS
+
+from ...styles.theme import CHART_COLORS, COLORS
 
 
 def net_worth_chart(

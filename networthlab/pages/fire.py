@@ -1,13 +1,14 @@
 """FIRE Calculator page."""
 
 import reflex as rx
-from ..components.layout.page_wrapper import page_wrapper
-from ..components.cards.stat_card import stat_card
+
 from ..components.cards.chart_card import chart_card
+from ..components.cards.stat_card import stat_card
 from ..components.charts.fire_progress import fire_progress_ring
 from ..components.charts.net_worth_chart import net_worth_projection_chart
+from ..components.layout.page_wrapper import page_wrapper
 from ..state.fire_state import FIREState
-from ..styles.theme import COLORS, GRADIENTS
+from ..styles.theme import COLORS
 
 
 def slider_input(

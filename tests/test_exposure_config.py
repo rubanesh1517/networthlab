@@ -9,7 +9,6 @@ import pytest
 from networthlab.services.exposure_config import (
     AccountGroupRule,
     ComplexSecurityFlag,
-    SecurityOverride,
     load_account_groups,
     load_complex_securities,
     load_security_overrides,
@@ -171,7 +170,9 @@ HXD.TO:  { flag: leveraged_inverse, leverage: -1.0 }
 """.strip()
     )
     flags = load_complex_securities(f)
-    assert flags["HYLD.TO"] == ComplexSecurityFlag(flag="covered_call_leverage", leverage=Decimal("1.25"))
+    assert flags["HYLD.TO"] == ComplexSecurityFlag(
+        flag="covered_call_leverage", leverage=Decimal("1.25")
+    )
     assert flags["HXD.TO"].leverage == Decimal("-1.0")
 
 

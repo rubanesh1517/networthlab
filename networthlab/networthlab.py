@@ -11,7 +11,6 @@ from .pages.settings import settings
 from .state.app_state import AppState
 from .state.exposure_state import ExposureState
 
-
 # Create the app with styling
 app = rx.App(
     theme=rx.theme(

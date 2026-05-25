@@ -1,11 +1,12 @@
 """Projections page for scenario comparison."""
 
 import reflex as rx
-from ..components.layout.page_wrapper import page_wrapper
+
 from ..components.cards.chart_card import chart_card
 from ..components.forms.scenario_form import scenario_form
+from ..components.layout.page_wrapper import page_wrapper
 from ..state.projection_state import ProjectionState
-from ..styles.theme import COLORS, CHART_COLORS
+from ..styles.theme import CHART_COLORS, COLORS
 
 
 def scenario_card(scenario: dict) -> rx.Component:

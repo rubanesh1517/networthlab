@@ -17,7 +17,7 @@ from networthlab.services.exposure_config import (
 )
 from networthlab.services.wealthsimple import (
     PositionsResult,
-    WealthsimpleAuthMissing,
+    WealthsimpleAuthError,
     WealthsimpleService,
 )
 
@@ -67,6 +67,10 @@ class ExposureState(rx.State):
     drilldown_sort_key: str = "value_cad_num"
     drilldown_sort_desc: bool = True
 
+    # Position-concentration drilldown: top-10 by default with a "show all" expander.
+    show_all_concentration: bool = False
+    total_concentration_count: int = 0
+
     _contributions: list[dict[str, Any]] = []
 
     async def on_load(self) -> None:
@@ -83,7 +87,7 @@ class ExposureState(rx.State):
         self.auth_required = False
         try:
             await self._refresh_impl(force_refresh=force_refresh)
-        except WealthsimpleAuthMissing as exc:
+        except WealthsimpleAuthError as exc:
             self.auth_required = True
             self.error_message = str(exc)
             self.is_empty = False
@@ -183,38 +187,49 @@ class ExposureState(rx.State):
         )
 
         def _dim_has_unclassified(dim: str) -> bool:
-            return any(r.dimension == dim and r.source == "unclassified" for r in snap.contributions)
+            return any(
+                r.dimension == dim and r.source == "unclassified"
+                for r in snap.contributions
+            )
 
         def _dim_has_stale_override(dim_attr: str) -> bool:
+            # Only meaningful for asset_class / sector / geography (override-sourced dims).
             return any(
                 getattr(cls, dim_attr).source == "override"
                 and lookup.is_override_stale(getattr(cls, dim_attr).as_of)
                 for cls in classifications.values()
             )
 
-        self.asset_class_chips = (
-            (["unclassified"] if _dim_has_unclassified("asset_class") else [])
-            + (["stale_override"] if _dim_has_stale_override("asset_class") else [])
-        )
-        self.geography_chips = (
-            (["unclassified"] if _dim_has_unclassified("geography") else [])
-            + (["stale_override"] if _dim_has_stale_override("geography") else [])
-        )
-        self.sector_chips = (
-            (["unclassified"] if _dim_has_unclassified("sector") else [])
-            + (["stale_override"] if _dim_has_stale_override("sector") else [])
-        )
-        self.currency_chips = (
-            ["unclassified"] if _dim_has_unclassified("currency") else []
-        )
-        self.concentration_chips = (
-            ["unclassified"] if _dim_has_unclassified("concentration") else []
-        )
-        self.account_chips = (
-            ["unclassified"]
-            if (_dim_has_unclassified("account") or self.needs_account_config)
-            else []
-        )
+        # Portfolio-wide signals that appear on every tile per spec §9.5:
+        # Leverage / Review complex / Stale data are not dim-specific — they
+        # apply to the whole snapshot, so each tile surfaces them too.
+        portfolio_chips: list[str] = []
+        if self.has_leverage:
+            portfolio_chips.append("leverage")
+        if self.has_review_complex:
+            portfolio_chips.append("review_complex")
+        if result.stale_minutes > 60:
+            portfolio_chips.append("stale_cache")
+
+        def _build_chips(dim: str, dim_attr: str | None = None) -> list[str]:
+            chips: list[str] = []
+            if _dim_has_unclassified(dim):
+                chips.append("unclassified")
+            if dim_attr and _dim_has_stale_override(dim_attr):
+                chips.append("stale_override")
+            chips.extend(portfolio_chips)
+            return chips
+
+        self.asset_class_chips = _build_chips("asset_class", "asset_class")
+        self.geography_chips = _build_chips("geography", "geography")
+        self.sector_chips = _build_chips("sector", "sector")
+        self.currency_chips = _build_chips("currency")
+        self.concentration_chips = _build_chips("concentration")
+        # Account tile additionally flags missing user config.
+        account_chips = _build_chips("account")
+        if self.needs_account_config and "unclassified" not in account_chips:
+            account_chips.insert(0, "unclassified")
+        self.account_chips = account_chips
 
         self.is_empty = len(result.positions) == 0
 
@@ -249,6 +264,7 @@ class ExposureState(rx.State):
         self.drilldown_dimension = dimension
         self.drilldown_bucket = bucket
         self.drilldown_open = True
+        self.show_all_concentration = False
         if bucket:
             rows = [
                 r for r in self._contributions
@@ -258,8 +274,26 @@ class ExposureState(rx.State):
             rows = [r for r in self._contributions if r["dimension"] == dimension]
         self.drilldown_sort_key = "value_cad_num"
         self.drilldown_sort_desc = True
+        rows = sorted(rows, key=lambda r: r["value_cad_num"], reverse=True)
+        # Spec §9.4: concentration tile defaults to top 10; "show all" expands.
+        if dimension == "concentration" and not bucket:
+            self.total_concentration_count = len(rows)
+            rows = rows[:10]
+        else:
+            self.total_concentration_count = 0
+        self.drilldown_rows = rows
+
+    def expand_concentration(self) -> None:
+        """Show-all button on the concentration drilldown — replaces the top-10
+        slice with every concentration row, sorted by current sort key."""
+        self.show_all_concentration = True
+        rows = [
+            r for r in self._contributions if r["dimension"] == "concentration"
+        ]
+        reverse = self.drilldown_sort_desc
+        key = self.drilldown_sort_key
         self.drilldown_rows = sorted(
-            rows, key=lambda r: r["value_cad_num"], reverse=True
+            rows, key=lambda r: r.get(key, ""), reverse=reverse
         )
 
     def close_drilldown(self) -> None:

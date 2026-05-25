@@ -54,6 +54,27 @@ def _sortable_header(label: str, sort_key: str) -> rx.Component:
     )
 
 
+def _show_all_concentration_footer() -> rx.Component:
+    """Visible only for the concentration drilldown when the top-10 slice is
+    in effect and there are more positions to show (spec §9.4)."""
+    return rx.cond(
+        (ExposureState.drilldown_dimension == "concentration")
+        & ~ExposureState.show_all_concentration
+        & (ExposureState.total_concentration_count > 10),
+        rx.flex(
+            rx.button(
+                "Show all " + ExposureState.total_concentration_count.to_string()
+                + " positions",
+                on_click=ExposureState.expand_concentration,
+                variant="soft",
+            ),
+            justify="center",
+            margin_top="12px",
+        ),
+        rx.fragment(),
+    )
+
+
 def drilldown_modal() -> rx.Component:
     return rx.dialog.root(
         rx.dialog.content(
@@ -77,6 +98,7 @@ def drilldown_modal() -> rx.Component:
                 max_height="60vh",
                 overflow_y="auto",
             ),
+            _show_all_concentration_footer(),
             max_width="900px",
             background=COLORS["bg_primary"],
         ),
