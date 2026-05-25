@@ -960,7 +960,7 @@ def load_complex_securities(path: Path) -> dict[str, ComplexSecurityFlag]:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_exposure_config.py -v`
-Expected: all 14 tests pass (the original 11 plus 3 YAML parse-error tests).
+Expected: all 15 tests pass (6 account-group, 3 override, 2 complex-security, 1 example-file smoke, 3 YAML parse-error).
 
 - [ ] **Step 5: Commit**
 
@@ -1452,6 +1452,106 @@ def test_non_etf_sector_from_yfinance_info(mocker, tmp_path):
     )
     assert result.sector.source == "provider"
     assert result.sector.buckets == {"technology": Decimal("1.0")}
+
+
+# --- Weight normalization (Task 5 follow-up) ---------------------------
+
+def _make_fd(sector_weightings=None, asset_classes=None):
+    """Synthetic funds_data stub for normalization tests."""
+
+    class FD:
+        pass
+
+    FD.sector_weightings = sector_weightings or {}
+    FD.asset_classes = asset_classes or {}
+
+    class TH:
+        def to_dict(self_inner):
+            return {}
+
+    FD.top_holdings = TH()
+    return FD()
+
+
+def test_provider_sector_weights_below_1_renormalized(mocker, tmp_path):
+    """yfinance occasionally returns sector_weightings summing to ~0.97;
+    chart needs them to sum to 1.0 for the donut to read correctly."""
+    mocker.patch(
+        "networthlab.services.etf_lookthrough.yf.Ticker"
+    ).return_value.funds_data = _make_fd(
+        sector_weightings={"tech": 0.5, "financials": 0.3, "healthcare": 0.17},
+        asset_classes={"stockPosition": 1.0},
+    )
+    bundle = make_override_bundle(
+        "DRIFT.TO",
+        asset_class={"equity": Decimal("1.0")},
+        sector="provider",
+        geography={"US": Decimal("1.0")},
+    )
+    svc = EtfLookthroughService(overrides=bundle, complex_flags={}, cache_dir=tmp_path)
+    result = svc.classify("DRIFT.TO", "ETF", "Drift", "TSX", "CAD")
+    total = sum(result.sector.buckets.values())
+    assert abs(total - Decimal("1")) < Decimal("0.0001")
+    assert any("renormalized" in n for n in result.sector.notes)
+
+
+def test_provider_sector_weights_above_1_renormalized(mocker, tmp_path):
+    mocker.patch(
+        "networthlab.services.etf_lookthrough.yf.Ticker"
+    ).return_value.funds_data = _make_fd(
+        sector_weightings={"tech": 0.6, "financials": 0.5},  # sums to 1.10
+        asset_classes={"stockPosition": 1.0},
+    )
+    bundle = make_override_bundle(
+        "DRIFT2.TO",
+        asset_class={"equity": Decimal("1.0")},
+        sector="provider",
+        geography={"US": Decimal("1.0")},
+    )
+    svc = EtfLookthroughService(overrides=bundle, complex_flags={}, cache_dir=tmp_path)
+    result = svc.classify("DRIFT2.TO", "ETF", "Drift", "TSX", "CAD")
+    total = sum(result.sector.buckets.values())
+    assert abs(total - Decimal("1")) < Decimal("0.0001")
+
+
+def test_provider_asset_class_sub_one_adds_other_remainder(mocker, tmp_path):
+    """asset_class < 1.0: add 'other' remainder rather than scaling up so the
+    raw equity weight is preserved (matters for HHI / leverage logic)."""
+    mocker.patch(
+        "networthlab.services.etf_lookthrough.yf.Ticker"
+    ).return_value.funds_data = _make_fd(
+        asset_classes={"stockPosition": 0.95},
+    )
+    bundle = make_override_bundle(
+        "GAP.TO",
+        asset_class="provider",
+        sector={"tech": Decimal("1.0")},
+        geography={"US": Decimal("1.0")},
+    )
+    svc = EtfLookthroughService(overrides=bundle, complex_flags={}, cache_dir=tmp_path)
+    result = svc.classify("GAP.TO", "ETF", "Gap", "TSX", "CAD")
+    assert result.asset_class.buckets["equity"] == Decimal("0.95")
+    assert result.asset_class.buckets["other"] == Decimal("0.05")
+
+
+def test_provider_asset_class_above_one_preserves_leverage(mocker, tmp_path):
+    """HYLD-style: stockPosition > 1.0 -> NOT normalized (review_complex
+    chip detection depends on equity > 1.0)."""
+    mocker.patch(
+        "networthlab.services.etf_lookthrough.yf.Ticker"
+    ).return_value.funds_data = _make_fd(
+        asset_classes={"stockPosition": 1.24, "cashPosition": -0.24},
+    )
+    bundle = make_override_bundle(
+        "LEV.TO",
+        asset_class="provider",
+        sector={"tech": Decimal("1.0")},
+        geography={"US": Decimal("1.0")},
+    )
+    svc = EtfLookthroughService(overrides=bundle, complex_flags={}, cache_dir=tmp_path)
+    result = svc.classify("LEV.TO", "ETF", "Lev", "TSX", "CAD")
+    assert result.asset_class.buckets["equity"] == Decimal("1.24")
+    assert "leverage preserved" in result.asset_class.notes[0]
 ```
 
 - [ ] **Step 2: Run new tests to verify they fail**
@@ -1493,6 +1593,47 @@ _SECURITY_TYPE_ASSET_CLASS = {
     "CASH": "cash",
     "OPTION": "option",
 }
+
+# Tolerance below which we ignore small float-drift sums; outside it we
+# either renormalize (sector/geography) or add an "other" remainder (asset_class).
+_WEIGHT_DRIFT_TOLERANCE = Decimal("0.005")
+
+
+def _normalize_buckets(
+    buckets: dict[str, Decimal],
+    notes: list[str],
+    *,
+    preserve_excess: bool,
+) -> dict[str, Decimal]:
+    """Make buckets sum to ~1.0 for charting.
+
+    preserve_excess=True (used for asset_class only): if total > 1.0, leave as-is
+    so leverage signal (e.g. HYLD stockPosition=1.24) is preserved for the
+    review-complex chip. Only fill an "other" remainder when total < 1.
+
+    preserve_excess=False (sector/geography): scale to sum to exactly 1.0.
+    """
+    if not buckets:
+        return buckets
+    total = sum(buckets.values())
+    if total <= 0:
+        return buckets
+    delta = abs(total - Decimal("1"))
+    if delta <= _WEIGHT_DRIFT_TOLERANCE:
+        return buckets
+    if preserve_excess and total > Decimal("1"):
+        notes.append(f"weights sum to {total:.4f} (leverage preserved, not normalized)")
+        return buckets
+    if preserve_excess and total < Decimal("1"):
+        remainder = Decimal("1") - total
+        out = dict(buckets)
+        out["other"] = out.get("other", Decimal("0")) + remainder
+        notes.append(f"weights summed to {total:.4f}; added 'other' = {remainder:.4f}")
+        return out
+    # Renormalize.
+    scaled = {k: v / total for k, v in buckets.items()}
+    notes.append(f"weights renormalized (raw sum was {total:.4f})")
+    return scaled
 ```
 
 Replace `_classify_asset_class` (note the added `symbol` parameter; the call site in `classify()` must be updated to pass it):
@@ -1534,8 +1675,10 @@ Replace `_classify_asset_class` (note the added `symbol` parameter; the call sit
                 buckets[bucket] = buckets.get(bucket, Decimal("0")) + w
         if not buckets:
             return _unclassified(notes=["yfinance asset_classes empty"])
+        notes: list[str] = []
+        buckets = _normalize_buckets(buckets, notes, preserve_excess=True)
         return DimensionBreakdown(
-            buckets=buckets, source="provider", as_of=None, notes=[]
+            buckets=buckets, source="provider", as_of=None, notes=notes
         )
 ```
 
@@ -1571,8 +1714,10 @@ Replace `_classify_sector` with:
                 buckets[str(key)] = buckets.get(str(key), Decimal("0")) + w
         if not buckets:
             return _unclassified(notes=["yfinance sector data empty"])
+        notes: list[str] = []
+        buckets = _normalize_buckets(buckets, notes, preserve_excess=False)
         return DimensionBreakdown(
-            buckets=buckets, source="provider", as_of=None, notes=[]
+            buckets=buckets, source="provider", as_of=None, notes=notes
         )
 ```
 
@@ -1599,7 +1744,7 @@ Add the lightweight yfinance helpers at the bottom of the class:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_etf_lookthrough.py -v`
-Expected: all 8 tests pass (the 4 from Task 4 plus the 4 new ones).
+Expected: all 12 tests pass (4 from Task 4, 4 provider-path tests, 4 normalization tests).
 
 - [ ] **Step 5: Commit**
 
@@ -1889,7 +2034,7 @@ Replace `_classify_geography` with:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_etf_lookthrough.py -v`
-Expected: all 12 tests pass.
+Expected: all 16 tests pass (12 from Task 5 plus 4 geography-fallback tests).
 
 - [ ] **Step 5: Commit**
 
@@ -2153,7 +2298,7 @@ Add the staleness helper:
 - [ ] **Step 4: Run all tests to verify they pass**
 
 Run: `pytest tests/test_etf_lookthrough.py -v`
-Expected: all 16 tests pass (the 15 plus `test_clear_symbols_evicts_only_listed_symbols`).
+Expected: all 20 tests pass (16 from Task 6 plus 3 cache/staleness plus `test_clear_symbols_evicts_only_listed_symbols`).
 
 - [ ] **Step 5: Commit**
 
@@ -2305,6 +2450,58 @@ def test_fetch_positions_must_request_includeSecurity_flag(mocker, tmp_path):
     assert mock_api.do_graphql_query.called
 
 
+def test_fetch_positions_paginates_and_disables_aggregation(mocker, tmp_path):
+    """Spec §6 / WS GraphQL: must page through all positions (first=100,
+    load_all_pages=True) and request non-aggregated rows so each account's
+    positions appear as separate edges."""
+    mock_api = mocker.MagicMock()
+    mock_api.get_accounts.return_value = []
+    mock_api.get_token_info.return_value = {"identity_canonical_id": "id"}
+    mock_api.do_graphql_query.return_value = []
+    mocker.patch(
+        "networthlab.services.wealthsimple.WealthsimpleAPI.from_token",
+        return_value=mock_api,
+    )
+    svc = WealthsimpleService(cache_dir=tmp_path)
+    svc._session_override = mocker.MagicMock(access_token="x")
+    svc.fetch_positions()
+    call = mock_api.do_graphql_query.call_args
+    variables = call.args[1]
+    assert variables["first"] == 100
+    assert variables["aggregated"] is False
+    # do_graphql_query takes load_all_pages as a kwarg.
+    assert call.kwargs.get("load_all_pages") is True
+
+
+def test_fetch_positions_raises_auth_missing_on_manual_login_required(mocker, tmp_path):
+    """Spec §10: expired/invalid session -> auth banner + page body hidden,
+    NOT silent cache fallback."""
+    from ws_api.exceptions import ManualLoginRequired
+
+    mocker.patch(
+        "networthlab.services.wealthsimple.WealthsimpleAPI.from_token",
+        side_effect=ManualLoginRequired("refresh token rejected"),
+    )
+    svc = WealthsimpleService(cache_dir=tmp_path)
+    svc._session_override = mocker.MagicMock(access_token="x")
+    with pytest.raises(WealthsimpleAuthMissing) as exc_info:
+        svc.fetch_positions()
+    assert "lunchsimple login" in str(exc_info.value)
+
+
+def test_fetch_positions_raises_auth_missing_on_login_failed(mocker, tmp_path):
+    from ws_api.exceptions import LoginFailedException
+
+    mocker.patch(
+        "networthlab.services.wealthsimple.WealthsimpleAPI.from_token",
+        side_effect=LoginFailedException("invalid creds"),
+    )
+    svc = WealthsimpleService(cache_dir=tmp_path)
+    svc._session_override = mocker.MagicMock(access_token="x")
+    with pytest.raises(WealthsimpleAuthMissing):
+        svc.fetch_positions()
+
+
 def test_fetch_positions_falls_back_to_cache_on_api_failure(mocker, tmp_path):
     # Seed the cache with a previous-known-good snapshot.
     cache_file = tmp_path / "positions_cache.json"
@@ -2373,6 +2570,7 @@ from pathlib import Path
 
 import keyring
 from ws_api import WealthsimpleAPI, WSAPISession
+from ws_api.exceptions import LoginFailedException, ManualLoginRequired
 
 from networthlab.models import Position
 
@@ -2438,19 +2636,32 @@ class WealthsimpleService:
             # security.securityType, and security.currency are absent from the
             # response — the entire look-through pipeline depends on them.
             # Call the underlying GraphQL query directly so we get the metadata.
+            # Also set first/aggregated and load_all_pages so we get per-account
+            # positions across the user's full portfolio, not just the first 25.
             edges = api.do_graphql_query(
                 "FetchIdentityPositions",
                 {
                     "identityId": api.get_token_info().get("identity_canonical_id"),
                     "currency": "CAD",
                     "filter": {"securityIds": None},
+                    "first": 100,
+                    "aggregated": False,
                     "includeAccountData": True,
                     "includeSecurity": True,
                 },
                 "identity.financials.current.positions.edges",
                 "array",
+                load_all_pages=True,
             )
+        except (ManualLoginRequired, LoginFailedException) as exc:
+            # Stored session can no longer be refreshed — user must re-login.
+            # Spec §10: surface auth banner, hide page body; NOT cache fallback.
+            raise WealthsimpleAuthMissing(
+                f"Wealthsimple session expired or invalid — run "
+                f"`lunchsimple login` to reconnect: {exc}"
+            ) from exc
         except Exception as exc:
+            # Network/server failure → render last cached snapshot.
             return self._render_from_cache(reason=f"WS API failed: {exc!s}")
 
         positions = self._normalize_positions(edges, accounts)
@@ -2539,7 +2750,7 @@ class WealthsimpleService:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_wealthsimple_service.py -v`
-Expected: 6 passed (4 originally listed plus 2 includeSecurity-related regression tests).
+Expected: 9 passed (2 session, 3 fetch baseline, 1 includeSecurity flag, 1 pagination/aggregation, 2 auth-exception).
 
 - [ ] **Step 5: Commit**
 
