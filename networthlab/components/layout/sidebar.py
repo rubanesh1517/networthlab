@@ -110,6 +110,13 @@ def sidebar() -> rx.Component:
                     collapsed=AppState.sidebar_collapsed,
                 ),
                 nav_item(
+                    "pie-chart",
+                    "Exposure",
+                    "/exposure",
+                    is_active=AppState.current_page == "exposure",
+                    collapsed=AppState.sidebar_collapsed,
+                ),
+                nav_item(
                     "flame",
                     "FIRE Calculator",
                     "/fire",

@@ -3,11 +3,13 @@
 import reflex as rx
 
 from .pages.dashboard import dashboard
+from .pages.exposure import exposure_page
 from .pages.fire import fire_calculator
 from .pages.loans import loan_tracker
 from .pages.projections import projections
 from .pages.settings import settings
 from .state.app_state import AppState
+from .state.exposure_state import ExposureState
 
 
 # Create the app with styling
@@ -37,6 +39,10 @@ class PageState(AppState):
         """Handle dashboard page load."""
         self.current_page = "dashboard"
 
+    def on_exposure_load(self) -> None:
+        """Handle exposure page load."""
+        self.current_page = "exposure"
+
     def on_fire_load(self) -> None:
         """Handle FIRE page load."""
         self.current_page = "fire"
@@ -60,6 +66,12 @@ app.add_page(
     route="/",
     title="Dashboard | NetWorthLab",
     on_load=PageState.on_dashboard_load,
+)
+app.add_page(
+    exposure_page,
+    route="/exposure",
+    title="Exposure | NetWorthLab",
+    on_load=[PageState.on_exposure_load, ExposureState.on_load],
 )
 app.add_page(
     fire_calculator,
