@@ -768,6 +768,32 @@ def test_committed_example_yamls_are_loadable():
 
     flags = load_complex_securities(REPO_ROOT / "config" / "complex_securities.yaml")
     assert "HYLD.TO" in flags
+
+
+# ----- YAML parse-error surfacing -----
+
+def test_malformed_account_groups_raises_with_file_path(tmp_path):
+    f = tmp_path / "bad_account_groups.yaml"
+    f.write_text("groups:\n  - name: 'Unterminated\n")  # unterminated string
+    with pytest.raises(ValueError) as exc_info:
+        load_account_groups(f)
+    assert str(f) in str(exc_info.value)
+
+
+def test_malformed_security_overrides_raises_with_file_path(tmp_path):
+    f = tmp_path / "bad_overrides.yaml"
+    f.write_text("securities:\n  AAA: { unterminated\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_security_overrides(f, None)
+    assert str(f) in str(exc_info.value)
+
+
+def test_malformed_complex_securities_raises_with_file_path(tmp_path):
+    f = tmp_path / "bad_complex.yaml"
+    f.write_text("AAA: { unterminated\n")
+    with pytest.raises(ValueError) as exc_info:
+        load_complex_securities(f)
+    assert str(f) in str(exc_info.value)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -827,11 +853,19 @@ class ComplexSecurityFlag(BaseModel):
 # account_groups
 # ----------------------------------------------------------------------
 
+def _safe_load(path: Path) -> object:
+    """yaml.safe_load with a clear error message that includes the file path."""
+    try:
+        return yaml.safe_load(path.read_text())
+    except yaml.YAMLError as exc:
+        raise ValueError(f"YAML parse error in {path}: {exc}") from exc
+
+
 def load_account_groups(path: Path) -> list[AccountGroupRule]:
     """Parse an account_groups.yaml file. Missing file -> empty list (caller surfaces a banner)."""
     if not path.is_file():
         return []
-    raw = yaml.safe_load(path.read_text())
+    raw = _safe_load(path)
     if not raw or "groups" not in raw:
         return []
     rules: list[AccountGroupRule] = []
@@ -887,7 +921,7 @@ def _parse_override(raw: dict) -> SecurityOverride:
 def _load_overrides_file(path: Path) -> tuple[int | None, dict[str, SecurityOverride]]:
     if not path or not path.is_file():
         return None, {}
-    raw = yaml.safe_load(path.read_text()) or {}
+    raw = _safe_load(path) or {}
     stale = raw.get("stale_after_days")
     securities_raw = raw.get("securities") or {}
     securities = {symbol: _parse_override(payload) for symbol, payload in securities_raw.items()}
@@ -913,7 +947,7 @@ def load_security_overrides(
 def load_complex_securities(path: Path) -> dict[str, ComplexSecurityFlag]:
     if not path.is_file():
         return {}
-    raw = yaml.safe_load(path.read_text()) or {}
+    raw = _safe_load(path) or {}
     return {
         symbol: ComplexSecurityFlag(
             flag=payload["flag"],
@@ -1651,15 +1685,19 @@ def test_geography_stock_exchange_aggregation(mocker, tmp_path):
         cache_dir=tmp_path,
     )
     result = svc.classify(
-        symbol="QQQM",
+        symbol="MYSTERY_BASKET",
         security_type="ETF",
-        name="Invesco NASDAQ 100 ETF",  # also name-pattern match, but stock-agg gets there first via order
-        listing_exchange="NASDAQ",
+        # Name deliberately avoids ALL patterns ('S&P 500', 'Total US', 'NASDAQ',
+        # 'FTSE Canada', etc.) so the algorithm MUST reach step 4 (stock-exchange
+        # aggregation across top_holdings) to produce a result.
+        name="Generic Quality Equity Basket",
+        listing_exchange="NEO",  # ETF listing exchange would NOT alone produce US
         listing_currency="USD",
     )
-    # NASDAQ-pattern match would also succeed; either heuristic source is acceptable.
     assert result.geography.source == "heuristic"
     assert "US" in result.geography.buckets
+    assert result.geography.buckets["US"] == Decimal("1.0")  # all top_holdings are NASDAQ
+    assert "top_holdings" in (result.geography.notes[0] if result.geography.notes else "")
 
 
 def test_geography_non_etf_uses_listing_exchange(tmp_path):
@@ -1928,6 +1966,35 @@ def test_is_override_stale_helper(tmp_path):
     assert svc.is_override_stale(fresh) is False
     assert svc.is_override_stale(old) is True
     assert svc.is_override_stale(None) is False
+
+
+def test_clear_symbols_evicts_only_listed_symbols(mocker, tmp_path, fake_funds_data):
+    """Refresh button (spec §11) must bust cache for currently-held symbols only."""
+    mock_ticker = mocker.patch("networthlab.services.etf_lookthrough.yf.Ticker")
+    mock_ticker.return_value.funds_data = fake_funds_data
+
+    bundle = SecurityOverrideBundle(
+        stale_after_days=180,
+        securities={
+            "AAA.TO": SecurityOverride(
+                asset_class="provider", sector="provider",
+                geography={"US": Decimal("1.0")}, as_of=date(2026, 1, 1),
+            ),
+            "BBB.TO": SecurityOverride(
+                asset_class="provider", sector="provider",
+                geography={"US": Decimal("1.0")}, as_of=date(2026, 1, 1),
+            ),
+        },
+    )
+    svc = EtfLookthroughService(overrides=bundle, complex_flags={}, cache_dir=tmp_path)
+    svc.classify("AAA.TO", "ETF", "AAA", "TSX", "CAD")
+    svc.classify("BBB.TO", "ETF", "BBB", "TSX", "CAD")
+    assert mock_ticker.call_count == 2
+
+    svc.clear_symbols(["AAA.TO"])  # only AAA cleared
+    svc.classify("AAA.TO", "ETF", "AAA", "TSX", "CAD")   # refetch
+    svc.classify("BBB.TO", "ETF", "BBB", "TSX", "CAD")   # still cache hit
+    assert mock_ticker.call_count == 3
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -2066,6 +2133,21 @@ Add the staleness helper:
         if as_of is None:
             return False
         return (date.today() - as_of).days > self.overrides.stale_after_days
+
+    def clear_symbols(self, symbols: list[str]) -> None:
+        """Evict the given symbols from the yfinance cache (spec §11).
+
+        Called by ExposureState.refresh so that a user-initiated refresh
+        actually re-fetches data for currently-held symbols instead of
+        re-reading the same 24h-cached snapshot.
+        """
+        changed = False
+        for symbol in symbols:
+            if symbol in self._cache:
+                del self._cache[symbol]
+                changed = True
+        if changed:
+            self._save_cache()
 ```
 
 - [ ] **Step 4: Run all tests to verify they pass**
@@ -2164,7 +2246,10 @@ def test_fetch_positions_normalizes_and_writes_cache(mocker, tmp_path):
         make_account("acct-1", "RRSP", "My RRSP"),
         make_account("acct-2", "TFSA", "My TFSA"),
     ]
-    mock_api.get_identity_positions.return_value = [
+    mock_api.get_token_info.return_value = {"identity_canonical_id": "identity-1"}
+    # Production calls do_graphql_query("FetchIdentityPositions", ...) directly
+    # to force includeSecurity=True; we stub that method (not get_identity_positions).
+    mock_api.do_graphql_query.return_value = [
         {"node": make_position("VEQT.TO", "5000", "acct-1", "ETF")},
         {"node": make_position("AAPL", "1500", "acct-2", "EQUITY")},
     ]
@@ -2192,6 +2277,32 @@ def test_fetch_positions_normalizes_and_writes_cache(mocker, tmp_path):
     assert cache_file.is_file()
     cached = json.loads(cache_file.read_text())
     assert cached["positions"][0]["symbol"] in {"VEQT.TO", "AAPL"}
+
+    # Critical: verify we called do_graphql_query with includeSecurity=True,
+    # otherwise the production payload would lack the metadata our pipeline needs.
+    call = mock_api.do_graphql_query.call_args
+    assert call.args[0] == "FetchIdentityPositions"
+    assert call.args[1]["includeSecurity"] is True
+    assert call.args[1]["includeAccountData"] is True
+
+
+def test_fetch_positions_must_request_includeSecurity_flag(mocker, tmp_path):
+    """Regression guard: the helper get_identity_positions hides the bug because
+    it doesn't pass includeSecurity. Make sure we explicitly call do_graphql_query."""
+    mock_api = mocker.MagicMock()
+    mock_api.get_accounts.return_value = []
+    mock_api.get_token_info.return_value = {"identity_canonical_id": "id"}
+    mock_api.do_graphql_query.return_value = []
+    mocker.patch(
+        "networthlab.services.wealthsimple.WealthsimpleAPI.from_token",
+        return_value=mock_api,
+    )
+    svc = WealthsimpleService(cache_dir=tmp_path)
+    svc._session_override = mocker.MagicMock(access_token="x")
+    svc.fetch_positions()
+    # Ensure the wrong path (get_identity_positions wrapper) is not used.
+    assert not mock_api.get_identity_positions.called
+    assert mock_api.do_graphql_query.called
 
 
 def test_fetch_positions_falls_back_to_cache_on_api_failure(mocker, tmp_path):
@@ -2320,7 +2431,25 @@ class WealthsimpleService:
         try:
             api = WealthsimpleAPI.from_token(session, self.persist_session)
             accounts = api.get_accounts()
-            edges = api.get_identity_positions(security_ids=None, currency="CAD")
+            # IMPORTANT: ws_api 0.34.0's get_identity_positions() helper does NOT
+            # pass includeSecurity=True, and the GraphQL query gates the
+            # SecuritySummary fragment behind `@include(if: $includeSecurity)`.
+            # Without the flag, security.stock.{symbol,name,primaryExchange},
+            # security.securityType, and security.currency are absent from the
+            # response — the entire look-through pipeline depends on them.
+            # Call the underlying GraphQL query directly so we get the metadata.
+            edges = api.do_graphql_query(
+                "FetchIdentityPositions",
+                {
+                    "identityId": api.get_token_info().get("identity_canonical_id"),
+                    "currency": "CAD",
+                    "filter": {"securityIds": None},
+                    "includeAccountData": True,
+                    "includeSecurity": True,
+                },
+                "identity.financials.current.positions.edges",
+                "array",
+            )
         except Exception as exc:
             return self._render_from_cache(reason=f"WS API failed: {exc!s}")
 
@@ -2969,28 +3098,42 @@ class ExposureState(rx.State):
     has_leverage: bool = False
     has_unclassified: bool = False
     has_stale_overrides: bool = False
+    has_review_complex: bool = False
+
+    # Empty / config gating
+    is_empty: bool = False
+    needs_account_config: bool = False
 
     # Raw contributions (kept for drilldown filtering)
     _contributions: list[dict[str, Any]] = []
 
     async def on_load(self) -> None:
-        await self.refresh()
+        """First page load — do not bust the yfinance cache."""
+        await self._do_refresh(force_refresh=False)
 
     async def refresh(self) -> None:
+        """Refresh button handler — bust cache for currently-held symbols (spec §11)."""
+        await self._do_refresh(force_refresh=True)
+
+    async def _do_refresh(self, force_refresh: bool) -> None:
         self.is_loading = True
         self.error_message = ""
         self.auth_required = False
         try:
-            await self._refresh_impl()
+            await self._refresh_impl(force_refresh=force_refresh)
         except WealthsimpleAuthMissing as exc:
             self.auth_required = True
             self.error_message = str(exc)
-        except Exception as exc:  # noqa: BLE001 — render the failure into UI
+            self.is_empty = False
+        except ValueError as exc:
+            # Raised by config loaders on YAML parse errors with file path included.
+            self.error_message = f"Config error: {exc}"
+        except Exception as exc:  # noqa: BLE001
             self.error_message = f"Unexpected error: {exc!s}"
         finally:
             self.is_loading = False
 
-    async def _refresh_impl(self) -> None:
+    async def _refresh_impl(self, force_refresh: bool) -> None:
         ws_svc = WealthsimpleService(cache_dir=USER_CONFIG_DIR)
         result: PositionsResult = ws_svc.fetch_positions()
 
@@ -2999,15 +3142,29 @@ class ExposureState(rx.State):
             USER_CONFIG_DIR / "security_overrides.yaml",
         )
         complex_flags = load_complex_securities(CONFIG_DIR / "complex_securities.yaml")
-        account_rules = load_account_groups(USER_CONFIG_DIR / "account_groups.yaml")
-        if not account_rules:
-            account_rules = load_account_groups(CONFIG_DIR / "account_groups.example.yaml")
+
+        # Spec §10: missing ~/.networthlab/account_groups.yaml -> "all Other"
+        # with a banner pointing to the example. Do NOT silently fall back to
+        # the committed example — that would mask the user's lack of config.
+        user_groups_path = USER_CONFIG_DIR / "account_groups.yaml"
+        account_rules = load_account_groups(user_groups_path)
+        self.needs_account_config = not account_rules
+        if self.needs_account_config:
+            result.warnings.append(
+                f"No {user_groups_path} — all accounts shown as 'Other'. "
+                f"Copy config/account_groups.example.yaml to {user_groups_path} and edit."
+            )
 
         lookup = EtfLookthroughService(
             overrides=bundle,
             complex_flags=complex_flags,
             cache_dir=USER_CONFIG_DIR,
         )
+        if force_refresh:
+            # Evict cache entries for currently-held symbols only (spec §11).
+            held_symbols = list({p.symbol for p in result.positions})
+            lookup.clear_symbols(held_symbols)
+
         classifications = {
             p.symbol: lookup.classify(
                 symbol=p.symbol,
@@ -3051,6 +3208,17 @@ class ExposureState(rx.State):
             or lookup.is_override_stale(cls.sector.as_of)
             for cls in classifications.values()
         )
+        # Spec §9.5 yellow "Review complex" chip: stockPosition > 1.0 (which our
+        # normalizer collapses into buckets["equity"] > 1.0) AND symbol not in
+        # complex_securities.yaml. Flags unknown leveraged/derivative structures.
+        self.has_review_complex = any(
+            cls.asset_class.buckets.get("equity", Decimal("0")) > Decimal("1.0")
+            and cls.symbol not in complex_flags
+            for cls in classifications.values()
+        )
+
+        # Empty-state gate
+        self.is_empty = len(result.positions) == 0
 
         # Cache contributions for drilldown — pre-format display strings so the
         # UI does not need raw rx.Var JS expressions.
@@ -3275,6 +3443,15 @@ def stale_override_chip() -> rx.Component:
 
 def stale_cache_chip(minutes: int) -> rx.Component:
     return _chip(f"Stale by {minutes}m", color="#9ca3af", bg="rgba(255,255,255,0.06)")
+
+
+def review_complex_chip() -> rx.Component:
+    """Yellow chip: stockPosition > 1.0 but symbol not in complex_securities.yaml.
+
+    Surfaces unknown leveraged/derivative ETFs the user should classify
+    explicitly in `config/complex_securities.yaml`.
+    """
+    return _chip("Review complex", color="#fbbf24", bg="rgba(245, 158, 11, 0.12)")
 ```
 
 - [ ] **Step 5: Run the dev server and verify the nav item appears**
@@ -3633,6 +3810,7 @@ import reflex as rx
 
 from ..components.exposure.chips import (
     leverage_chip,
+    review_complex_chip,
     stale_cache_chip,
     stale_override_chip,
     unclassified_chip,
@@ -3664,10 +3842,28 @@ def _auth_banner() -> rx.Component:
     )
 
 
+def _empty_state() -> rx.Component:
+    return rx.center(
+        rx.vstack(
+            rx.icon("inbox", size=32, color=COLORS["text_secondary"]),
+            rx.text(
+                "No positions found in your Wealthsimple accounts.",
+                color=COLORS["text_secondary"],
+                font_size="14px",
+            ),
+            spacing="2",
+        ),
+        padding="48px",
+        background=COLORS["bg_secondary"],
+        border_radius="12px",
+    )
+
+
 def _global_chips() -> rx.Component:
     return rx.hstack(
         rx.cond(ExposureState.has_unclassified, unclassified_chip(), rx.fragment()),
         rx.cond(ExposureState.has_leverage, leverage_chip(), rx.fragment()),
+        rx.cond(ExposureState.has_review_complex, review_complex_chip(), rx.fragment()),
         rx.cond(ExposureState.has_stale_overrides, stale_override_chip(), rx.fragment()),
         rx.cond(
             ExposureState.cache_stale_minutes > 0,
@@ -3709,13 +3905,32 @@ def _grid() -> rx.Component:
     )
 
 
-def exposure_page() -> rx.Component:
-    return page_wrapper(
-        rx.cond(
-            ExposureState.auth_required,
-            _auth_banner(),
-            rx.fragment(),
+def _warnings_banner() -> rx.Component:
+    """Renders the list of non-fatal warnings (missing config, stale cache reasons, etc.)."""
+    return rx.cond(
+        ExposureState.warnings.length() > 0,
+        rx.box(
+            rx.vstack(
+                rx.foreach(
+                    ExposureState.warnings,
+                    lambda w: rx.text(w, font_size="12px", color=COLORS["text_secondary"]),
+                ),
+                spacing="1",
+                align="start",
+            ),
+            padding="10px 14px",
+            background="rgba(245, 158, 11, 0.08)",
+            border_left="3px solid #f59e0b",
+            border_radius="6px",
+            margin_bottom="12px",
         ),
+        rx.fragment(),
+    )
+
+
+def _body() -> rx.Component:
+    """Main body — only rendered when authenticated."""
+    return rx.fragment(
         rx.cond(
             ExposureState.error_message != "",
             rx.box(
@@ -3725,10 +3940,30 @@ def exposure_page() -> rx.Component:
             ),
             rx.fragment(),
         ),
-        kpi_bar(),
-        _global_chips(),
-        _grid(),
-        drilldown_modal(),
+        _warnings_banner(),
+        rx.cond(
+            ExposureState.is_empty,
+            _empty_state(),
+            rx.fragment(
+                kpi_bar(),
+                _global_chips(),
+                _grid(),
+                drilldown_modal(),
+            ),
+        ),
+    )
+
+
+def exposure_page() -> rx.Component:
+    # page_wrapper signature: (title, subtitle, *children).
+    return page_wrapper(
+        "Exposure",
+        "Portfolio diversification by market exposure",
+        rx.cond(
+            ExposureState.auth_required,
+            _auth_banner(),   # Spec §10: auth required -> body hidden.
+            _body(),
+        ),
     )
 ```
 
