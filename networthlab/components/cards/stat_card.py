@@ -10,7 +10,7 @@ def stat_card(
     value: str | rx.Var[str],
     icon: str = "wallet",
     color: str = "purple",
-    subtitle: str = "",
+    subtitle: str | rx.Var[str] = "",
     trend: float | None = None,
     width: str | None = None,
 ) -> rx.Component:
@@ -58,14 +58,17 @@ def stat_card(
             background="rgba(16, 185, 129, 0.1)" if is_positive else "rgba(239, 68, 68, 0.1)",
         )
 
-    # Build subtitle component
-    subtitle_component = rx.fragment()
-    if subtitle:
-        subtitle_component = rx.text(
+    # Build subtitle component — must use rx.cond so Reflex Vars work,
+    # not just Python str (e.g. the Exposure KPI cards pass dynamic Vars).
+    subtitle_component = rx.cond(
+        subtitle != "",
+        rx.text(
             subtitle,
             font_size="12px",
             color=COLORS["text_secondary"],
-        )
+        ),
+        rx.fragment(),
+    )
 
     return rx.box(
         rx.vstack(
