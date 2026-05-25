@@ -187,6 +187,40 @@ def test_normalize_positions_converts_usd_totalvalue_to_cad():
     assert by_symbol["VEQT.TO"].book_value_cad == Decimal("180")
 
 
+def test_normalize_cash_synthesizes_one_position_per_account():
+    """Each account's CAD + USD cash sleeve becomes a single CAD-valued
+    Position with symbol='CASH'. Negative balances (margin debt) pass
+    through; accounts with zero cash are skipped."""
+    from networthlab.services.wealthsimple import WealthsimpleService
+
+    accounts = [
+        {"id": "tfsa-1", "unifiedAccountType": "SELF_DIRECTED_TFSA", "nickname": "T"},
+        {"id": "rrsp-1", "unifiedAccountType": "SELF_DIRECTED_RRSP", "nickname": "R"},
+        {"id": "empty-1", "unifiedAccountType": "CASH", "nickname": "E"},
+        {
+            "id": "margin-1",
+            "unifiedAccountType": "SELF_DIRECTED_NON_REGISTERED_MARGIN",
+            "nickname": "M",
+        },
+    ]
+    cash_by_account = {
+        "tfsa-1": {"sec-c-cad": "13.71", "sec-c-usd": "1409.48"},   # 13.71 + 1409.48*1.37
+        "rrsp-1": {"sec-c-cad": "1131.36", "sec-c-usd": "13456.82"},
+        "empty-1": {},                                                # skipped
+        "margin-1": {"sec-c-usd": "-21214.27"},                       # negative margin debt
+    }
+    positions = WealthsimpleService._normalize_cash(
+        accounts, cash_by_account, usd_cad_rate=Decimal("1.37")
+    )
+    by_acct = {p.account_id: p for p in positions}
+    assert len(positions) == 3  # empty-1 skipped
+    assert by_acct["tfsa-1"].market_value_cad == Decimal("13.71") + Decimal("1409.48") * Decimal("1.37")
+    assert by_acct["rrsp-1"].symbol == "CASH"
+    assert by_acct["rrsp-1"].security_type == "CASH"
+    # Negative margin balance flows through as debt:
+    assert by_acct["margin-1"].market_value_cad == Decimal("-21214.27") * Decimal("1.37")
+
+
 def test_fetch_positions_dedupes_account_symbol_pairs(mocker, tmp_path):
     """If WS returns the same (account, symbol) more than once (which
     happens when aggregated=False still groups account ids per security),

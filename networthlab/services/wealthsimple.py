@@ -143,11 +143,21 @@ class WealthsimpleService:
                 "array",
                 load_all_pages=True,
             )
-            # USD/CAD spot rate so we can convert USD totalValue locally —
-            # WS's currencyOverride enum doesn't accept "CAD" as a value
-            # (UNPROCESSABLE_ENTITY), so totalValue stays in native currency
-            # and we convert here.
+            # USD/CAD spot rate — also needed for USD cash balances even
+            # though totalValue itself already comes back CAD-converted.
             usd_cad_rate = _fetch_usd_cad_rate()
+
+            # Cash sleeves per account. FetchIdentityPositions only returns
+            # invested positions; cash (sec-c-cad / sec-c-usd) lives in a
+            # separate account_balances call. Without this the per-account
+            # totals are 3-30% short of the WS account-page balance and
+            # the entire CASH / margin-loan accounts are invisible.
+            cash_by_account: dict[str, dict] = {}
+            for acct in accounts:
+                try:
+                    cash_by_account[acct["id"]] = api.get_account_balances(acct["id"])
+                except Exception:
+                    cash_by_account[acct["id"]] = {}
         except (ManualLoginRequired, LoginFailedException) as exc:
             # Spec §10: surface auth banner, hide page body; NOT cache fallback.
             raise WealthsimpleAuthError(
@@ -158,8 +168,55 @@ class WealthsimpleService:
             return self._render_from_cache(reason=f"WS API failed: {exc!s}")
 
         positions = self._normalize_positions(edges, accounts, usd_cad_rate)
+        positions.extend(
+            self._normalize_cash(accounts, cash_by_account, usd_cad_rate)
+        )
         self._write_cache(positions)
         return PositionsResult(positions=positions, stale_minutes=0, warnings=[])
+
+    @staticmethod
+    def _normalize_cash(
+        accounts: list[dict],
+        cash_by_account: dict[str, dict],
+        usd_cad_rate: Decimal,
+    ) -> list[Position]:
+        """Synthesize a CASH Position per account so cash sleeves count.
+
+        Lumps each account's CAD + USD cash into a single CAD-valued
+        Position with symbol='CASH'. USD cash (e.g. sec-c-usd) is FX-
+        converted using the spot rate. Negative balances (margin loans)
+        flow through as-is so the account total reflects the debt.
+
+        Accounts with zero cash are skipped so we don't fill the
+        concentration tile with empty rows.
+        """
+        out: list[Position] = []
+        for acct in accounts:
+            balances = cash_by_account.get(acct["id"], {})
+            try:
+                cad = Decimal(str(balances.get("sec-c-cad", "0")))
+                usd = Decimal(str(balances.get("sec-c-usd", "0")))
+            except Exception:
+                continue
+            total = cad + (usd * usd_cad_rate)
+            if total == 0:
+                continue
+            out.append(
+                Position(
+                    account_id=acct["id"],
+                    account_type=acct.get("unifiedAccountType", "UNKNOWN"),
+                    account_nickname=acct.get("nickname", "") or "",
+                    symbol="CASH",
+                    name="Cash",
+                    security_type="CASH",
+                    listing_currency="CAD",
+                    listing_exchange="",
+                    quantity=Decimal("1"),
+                    market_value_cad=total,
+                    book_value_cad=total,
+                )
+            )
+        return out
 
     @staticmethod
     def _normalize_positions(
