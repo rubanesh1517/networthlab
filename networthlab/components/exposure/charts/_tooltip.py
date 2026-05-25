@@ -9,12 +9,15 @@ tooltip ends up showing raw floats like `126628.1852623616`). Subclassing
 from typing import Any
 
 import reflex as rx
-from reflex.components.recharts.general import GraphingTooltip
+from reflex.components.recharts.general import GraphingTooltip as _BaseTooltip
 
 from ....styles.theme import COLORS
 
 
-class _TooltipWithFormatter(GraphingTooltip):
+# Subclass keeps the parent's class NAME so rx.recharts.pie_chart's
+# children-class validator (which checks Python `__name__`, not tag/alias)
+# accepts this as a valid GraphingTooltip child.
+class GraphingTooltip(_BaseTooltip):
     """GraphingTooltip + the missing `formatter` recharts prop."""
 
     formatter: rx.Var[Any]
@@ -31,7 +34,7 @@ _CURRENCY_FORMATTER = rx.Var(
 
 
 def currency_tooltip() -> rx.Component:
-    return _TooltipWithFormatter.create(
+    return GraphingTooltip.create(
         formatter=_CURRENCY_FORMATTER,
         separator=": ",
         cursor={"fill": "rgba(255,255,255,0.04)"},
