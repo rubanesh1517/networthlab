@@ -442,7 +442,7 @@ securities:
   VEQT.TO:
     asset_class: { equity: 1.0 }
     sector: provider
-    geography: { US: 0.448, CAN: 0.306, INTL_DEV: 0.177, EM: 0.072 }
+    geography: { US: 0.447, CAN: 0.305, INTL_DEV: 0.176, EM: 0.072 }
     as_of: "2026-05-24"
   VGRO.TO:
     asset_class: { equity: 0.8, bond: 0.2 }
@@ -1105,6 +1105,93 @@ def test_currency_dimension_always_derived_from_listing_currency():
     )
     assert result.currency.source == "heuristic"
     assert result.currency.buckets == {"USD": Decimal("1.0")}
+
+
+def test_override_geography_with_drift_is_renormalized(tmp_path):
+    """YAML override buckets summing to 1.003 (e.g., rounded ETF weights) get
+    normalized so tile totals match the portfolio total exactly."""
+    bundle = make_override_bundle(
+        "DRIFT.TO",
+        asset_class={"equity": Decimal("1.0")},
+        sector="provider",
+        geography={
+            "US": Decimal("0.448"),
+            "CAN": Decimal("0.306"),
+            "INTL_DEV": Decimal("0.177"),
+            "EM": Decimal("0.072"),
+        },  # sums to 1.003
+        as_of=date(2026, 1, 15),
+    )
+    svc = EtfLookthroughService(
+        overrides=bundle,
+        complex_flags={},
+        cache_dir=tmp_path,
+        yfinance_disabled=True,
+    )
+    result = svc.classify(
+        symbol="DRIFT.TO",
+        security_type="ETF",
+        name="Drifty Fund",
+        listing_exchange="TSX",
+        listing_currency="CAD",
+    )
+    total = sum(result.geography.buckets.values())
+    assert abs(total - Decimal("1")) < Decimal("0.0001")
+    assert any("renormalized" in n for n in result.geography.notes)
+
+
+def test_override_asset_class_under_one_adds_other_remainder(tmp_path):
+    """asset_class override < 1.0 -> add 'other' remainder rather than scaling
+    (so HHI / leverage logic still sees raw equity weight)."""
+    bundle = make_override_bundle(
+        "GAP_OV.TO",
+        asset_class={"equity": Decimal("0.95")},
+        sector="provider",
+        geography={"US": Decimal("1.0")},
+        as_of=date(2026, 1, 1),
+    )
+    svc = EtfLookthroughService(
+        overrides=bundle,
+        complex_flags={},
+        cache_dir=tmp_path,
+        yfinance_disabled=True,
+    )
+    result = svc.classify(
+        symbol="GAP_OV.TO",
+        security_type="ETF",
+        name="Gap",
+        listing_exchange="TSX",
+        listing_currency="CAD",
+    )
+    assert result.asset_class.buckets["equity"] == Decimal("0.95")
+    assert result.asset_class.buckets["other"] == Decimal("0.05")
+
+
+def test_override_asset_class_above_one_preserves_leverage(tmp_path):
+    """User-defined override with equity > 1.0 (intentional leverage marker)
+    must NOT be normalized — review_complex chip detection depends on this."""
+    bundle = make_override_bundle(
+        "LEV_OV.TO",
+        asset_class={"equity": Decimal("1.25")},
+        sector="provider",
+        geography={"US": Decimal("1.0")},
+        as_of=date(2026, 1, 1),
+    )
+    svc = EtfLookthroughService(
+        overrides=bundle,
+        complex_flags={},
+        cache_dir=tmp_path,
+        yfinance_disabled=True,
+    )
+    result = svc.classify(
+        symbol="LEV_OV.TO",
+        security_type="ETF",
+        name="Lev",
+        listing_exchange="TSX",
+        listing_currency="CAD",
+    )
+    assert result.asset_class.buckets["equity"] == Decimal("1.25")
+    assert "leverage preserved" in result.asset_class.notes[0]
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1161,19 +1248,78 @@ def _unclassified(notes: list[str] | None = None) -> DimensionBreakdown:
     )
 
 
+# Float drift below this is treated as "essentially 1.0" — no normalization.
+_WEIGHT_DRIFT_TOLERANCE = Decimal("0.005")
+
+
+def _normalize_buckets(
+    buckets: dict[str, Decimal],
+    notes: list[str],
+    *,
+    preserve_excess: bool,
+) -> dict[str, Decimal]:
+    """Coerce buckets to sum ~1.0 for charting.
+
+    preserve_excess=True (asset_class only):
+      - total > 1.0 -> leave as-is (preserves leverage / review_complex signal)
+      - total < 1.0 -> add an "other" remainder rather than scaling up
+    preserve_excess=False (sector / geography / others):
+      - scale to sum to exactly 1.0 when drift > tolerance
+
+    Used by both `_override_breakdown` (YAML buckets) and the provider paths
+    so that YAML values like {US:0.448, CAN:0.306, INTL_DEV:0.177, EM:0.072}
+    (1.003) get the same treatment as a yfinance sector_weightings of 0.97.
+    """
+    if not buckets:
+        return buckets
+    total = sum(buckets.values())
+    if total <= 0:
+        return buckets
+    delta = abs(total - Decimal("1"))
+    if delta <= _WEIGHT_DRIFT_TOLERANCE:
+        return buckets
+    if preserve_excess and total > Decimal("1"):
+        notes.append(f"weights sum to {total:.4f} (leverage preserved, not normalized)")
+        return buckets
+    if preserve_excess and total < Decimal("1"):
+        remainder = Decimal("1") - total
+        out = dict(buckets)
+        out["other"] = out.get("other", Decimal("0")) + remainder
+        notes.append(f"weights summed to {total:.4f}; added 'other' = {remainder:.4f}")
+        return out
+    scaled = {k: v / total for k, v in buckets.items()}
+    notes.append(f"weights renormalized (raw sum was {total:.4f})")
+    return scaled
+
+
 def _override_breakdown(
-    dim_value: Union[dict[str, Decimal], str], as_of
+    dim_value: Union[dict[str, Decimal], str],
+    as_of,
+    *,
+    preserve_excess: bool,
 ) -> DimensionBreakdown | None:
     """Return a DimensionBreakdown if the override is a concrete dict.
-    Returns None if the override says `provider` (caller falls through)."""
+    Returns None if the override says `provider` (caller falls through).
+
+    The buckets pass through the same `_normalize_buckets` helper used for
+    provider data so that real-world rounded YAML values (e.g., VEQT geography
+    {US:0.448, CAN:0.306, INTL_DEV:0.177, EM:0.072} = 1.003) don't bleed into
+    aggregated tile totals. `preserve_excess=True` for asset_class only
+    (preserves leverage signals from user-defined overrides like {equity:1.25}).
+    """
     if dim_value == "provider":
         return None
     if isinstance(dim_value, dict):
+        buckets = {k: Decimal(str(v)) for k, v in dim_value.items()}
+        notes: list[str] = []
+        # _normalize_buckets is defined in Task 5; this helper lives in the
+        # same module so the forward reference is resolved at call time.
+        buckets = _normalize_buckets(buckets, notes, preserve_excess=preserve_excess)
         return DimensionBreakdown(
-            buckets={k: Decimal(str(v)) for k, v in dim_value.items()},
+            buckets=buckets,
             source="override",
             as_of=as_of,
-            notes=[],
+            notes=notes,
         )
     return None
 
@@ -1243,7 +1389,7 @@ class EtfLookthroughService:
         self, override: SecurityOverride | None, is_etf: bool, security_type: str
     ) -> DimensionBreakdown:
         if override:
-            ob = _override_breakdown(override.asset_class, override.as_of)
+            ob = _override_breakdown(override.asset_class, override.as_of, preserve_excess=True)
             if ob:
                 return ob
         # Provider path (Task 5) goes here for ETFs.
@@ -1254,7 +1400,7 @@ class EtfLookthroughService:
         self, override: SecurityOverride | None, is_etf: bool, symbol: str
     ) -> DimensionBreakdown:
         if override:
-            ob = _override_breakdown(override.sector, override.as_of)
+            ob = _override_breakdown(override.sector, override.as_of, preserve_excess=False)
             if ob:
                 return ob
         # Provider path (Task 5) goes here.
@@ -1269,7 +1415,7 @@ class EtfLookthroughService:
         symbol: str,
     ) -> DimensionBreakdown:
         if override:
-            ob = _override_breakdown(override.geography, override.as_of)
+            ob = _override_breakdown(override.geography, override.as_of, preserve_excess=False)
             if ob:
                 return ob
         # Name-pattern / stock-exchange / listing-exchange fallbacks (Task 6) go here.
@@ -1287,7 +1433,7 @@ class EtfLookthroughService:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_etf_lookthrough.py -v`
-Expected: 4 passed.
+Expected: 7 passed (4 baseline + 3 override-normalization tests).
 
 - [ ] **Step 5: Commit**
 
@@ -1557,7 +1703,7 @@ def test_provider_asset_class_above_one_preserves_leverage(mocker, tmp_path):
 - [ ] **Step 2: Run new tests to verify they fail**
 
 Run: `pytest tests/test_etf_lookthrough.py -v`
-Expected: 4 new failures (`networthlab.services.etf_lookthrough.yf` doesn't exist yet, plus the asset-class-from-type and provider branches aren't implemented).
+Expected: 8 new failures — 4 provider-path tests and 4 provider-normalization tests. All 8 exercise the yfinance branches that aren't implemented yet (the override-only path from Task 4 still passes).
 
 - [ ] **Step 3: Implement the provider branches**
 
@@ -1593,48 +1739,9 @@ _SECURITY_TYPE_ASSET_CLASS = {
     "CASH": "cash",
     "OPTION": "option",
 }
-
-# Tolerance below which we ignore small float-drift sums; outside it we
-# either renormalize (sector/geography) or add an "other" remainder (asset_class).
-_WEIGHT_DRIFT_TOLERANCE = Decimal("0.005")
-
-
-def _normalize_buckets(
-    buckets: dict[str, Decimal],
-    notes: list[str],
-    *,
-    preserve_excess: bool,
-) -> dict[str, Decimal]:
-    """Make buckets sum to ~1.0 for charting.
-
-    preserve_excess=True (used for asset_class only): if total > 1.0, leave as-is
-    so leverage signal (e.g. HYLD stockPosition=1.24) is preserved for the
-    review-complex chip. Only fill an "other" remainder when total < 1.
-
-    preserve_excess=False (sector/geography): scale to sum to exactly 1.0.
-    """
-    if not buckets:
-        return buckets
-    total = sum(buckets.values())
-    if total <= 0:
-        return buckets
-    delta = abs(total - Decimal("1"))
-    if delta <= _WEIGHT_DRIFT_TOLERANCE:
-        return buckets
-    if preserve_excess and total > Decimal("1"):
-        notes.append(f"weights sum to {total:.4f} (leverage preserved, not normalized)")
-        return buckets
-    if preserve_excess and total < Decimal("1"):
-        remainder = Decimal("1") - total
-        out = dict(buckets)
-        out["other"] = out.get("other", Decimal("0")) + remainder
-        notes.append(f"weights summed to {total:.4f}; added 'other' = {remainder:.4f}")
-        return out
-    # Renormalize.
-    scaled = {k: v / total for k, v in buckets.items()}
-    notes.append(f"weights renormalized (raw sum was {total:.4f})")
-    return scaled
 ```
+
+`_WEIGHT_DRIFT_TOLERANCE` and `_normalize_buckets` are already defined in the file from Task 4 — no need to re-declare them here.
 
 Replace `_classify_asset_class` (note the added `symbol` parameter; the call site in `classify()` must be updated to pass it):
 
@@ -1647,7 +1754,7 @@ Replace `_classify_asset_class` (note the added `symbol` parameter; the call sit
         symbol: str,
     ) -> DimensionBreakdown:
         if override:
-            ob = _override_breakdown(override.asset_class, override.as_of)
+            ob = _override_breakdown(override.asset_class, override.as_of, preserve_excess=True)
             if ob:
                 return ob
         if not is_etf:
@@ -1692,7 +1799,7 @@ Replace `_classify_sector` with:
         symbol: str,
     ) -> DimensionBreakdown:
         if override:
-            ob = _override_breakdown(override.sector, override.as_of)
+            ob = _override_breakdown(override.sector, override.as_of, preserve_excess=False)
             if ob:
                 return ob
         if self.yfinance_disabled:
@@ -1744,7 +1851,7 @@ Add the lightweight yfinance helpers at the bottom of the class:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_etf_lookthrough.py -v`
-Expected: all 12 tests pass (4 from Task 4, 4 provider-path tests, 4 normalization tests).
+Expected: all 15 tests pass (7 from Task 4, 4 provider-path tests, 4 provider normalization tests).
 
 - [ ] **Step 5: Commit**
 
@@ -1964,7 +2071,7 @@ Replace `_classify_geography` with:
         symbol: str,
     ) -> DimensionBreakdown:
         if override:
-            ob = _override_breakdown(override.geography, override.as_of)
+            ob = _override_breakdown(override.geography, override.as_of, preserve_excess=False)
             if ob:
                 return ob
 
@@ -2034,7 +2141,7 @@ Replace `_classify_geography` with:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_etf_lookthrough.py -v`
-Expected: all 16 tests pass (12 from Task 5 plus 4 geography-fallback tests).
+Expected: all 19 tests pass (15 from Task 5 plus 4 geography-fallback tests).
 
 - [ ] **Step 5: Commit**
 
@@ -2298,7 +2405,7 @@ Add the staleness helper:
 - [ ] **Step 4: Run all tests to verify they pass**
 
 Run: `pytest tests/test_etf_lookthrough.py -v`
-Expected: all 20 tests pass (16 from Task 6 plus 3 cache/staleness plus `test_clear_symbols_evicts_only_listed_symbols`).
+Expected: all 23 tests pass (19 from Task 6 plus 3 cache/staleness plus `test_clear_symbols_evicts_only_listed_symbols`).
 
 - [ ] **Step 5: Commit**
 
