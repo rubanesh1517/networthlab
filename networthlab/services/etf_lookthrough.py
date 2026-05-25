@@ -21,6 +21,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Union
 
+import yfinance as yf
+
 from networthlab.models import (
     ClassificationComponent,
     DimensionBreakdown,
@@ -46,6 +48,25 @@ def _unclassified(notes: list[str] | None = None) -> DimensionBreakdown:
 # 0.001 catches publisher rounding (e.g., VEQT geography 1.003) while ignoring
 # yfinance's float-precision noise (~1e-6).
 _WEIGHT_DRIFT_TOLERANCE = Decimal("0.001")
+
+_YF_ASSET_CLASS_MAP = {
+    "stockPosition": "equity",
+    "bondPosition": "bond",
+    "cashPosition": "cash",
+    "preferredPosition": "preferred",
+    "convertiblePosition": "convertible",
+    "otherPosition": "other",
+}
+
+_SECURITY_TYPE_ASSET_CLASS = {
+    "EQUITY": "equity",
+    "STOCK": "equity",
+    "ETF": "equity",
+    "BOND": "bond",
+    "CRYPTO": "crypto",
+    "CASH": "cash",
+    "OPTION": "option",
+}
 
 
 def _normalize_buckets(
@@ -136,7 +157,7 @@ class EtfLookthroughService:
         override = self.overrides.securities.get(symbol)
         is_etf = security_type.upper() == "ETF"
 
-        asset_class = self._classify_asset_class(override, is_etf, security_type)
+        asset_class = self._classify_asset_class(override, is_etf, security_type, symbol)
         sector = self._classify_sector(override, is_etf, symbol)
         geography = self._classify_geography(override, is_etf, name, listing_exchange, symbol)
         currency = self._derive_currency(listing_currency)
@@ -161,22 +182,81 @@ class EtfLookthroughService:
         )
 
     def _classify_asset_class(
-        self, override: SecurityOverride | None, is_etf: bool, security_type: str
+        self,
+        override: SecurityOverride | None,
+        is_etf: bool,
+        security_type: str,
+        symbol: str,
     ) -> DimensionBreakdown:
         if override:
             ob = _override_breakdown(override.asset_class, override.as_of, preserve_excess=True)
             if ob:
                 return ob
-        return _unclassified(notes=["no override; provider not implemented in this task"])
+        if not is_etf:
+            bucket = _SECURITY_TYPE_ASSET_CLASS.get(security_type.upper())
+            if bucket:
+                return DimensionBreakdown(
+                    buckets={bucket: Decimal("1.0")},
+                    source="heuristic",
+                    as_of=None,
+                    notes=[f"derived from security_type={security_type}"],
+                )
+            return _unclassified(notes=[f"unknown security_type={security_type}"])
+        if self.yfinance_disabled:
+            return _unclassified(notes=["yfinance disabled"])
+        try:
+            fd = self._get_funds_data(symbol)
+            raw = getattr(fd, "asset_classes", None) or {}
+        except Exception as exc:
+            return _unclassified(notes=[f"yfinance error: {exc!s}"])
+        buckets: dict[str, Decimal] = {}
+        for yf_key, weight in raw.items():
+            bucket = _YF_ASSET_CLASS_MAP.get(yf_key, yf_key)
+            w = Decimal(str(weight))
+            if w > 0:
+                buckets[bucket] = buckets.get(bucket, Decimal("0")) + w
+        if not buckets:
+            return _unclassified(notes=["yfinance asset_classes empty"])
+        notes: list[str] = []
+        buckets = _normalize_buckets(buckets, notes, preserve_excess=True)
+        return DimensionBreakdown(
+            buckets=buckets, source="provider", as_of=None, notes=notes
+        )
 
     def _classify_sector(
-        self, override: SecurityOverride | None, is_etf: bool, symbol: str
+        self,
+        override: SecurityOverride | None,
+        is_etf: bool,
+        symbol: str,
     ) -> DimensionBreakdown:
         if override:
             ob = _override_breakdown(override.sector, override.as_of, preserve_excess=False)
             if ob:
                 return ob
-        return _unclassified(notes=["no override; provider not implemented in this task"])
+        if self.yfinance_disabled:
+            return _unclassified(notes=["yfinance disabled"])
+        try:
+            if is_etf:
+                fd = self._get_funds_data(symbol)
+                raw = getattr(fd, "sector_weightings", None) or {}
+            else:
+                info = self._get_info(symbol)
+                sector_name = (info or {}).get("sector")
+                raw = {sector_name.lower(): 1.0} if sector_name else {}
+        except Exception as exc:
+            return _unclassified(notes=[f"yfinance error: {exc!s}"])
+        buckets: dict[str, Decimal] = {}
+        for key, weight in raw.items():
+            w = Decimal(str(weight))
+            if w > 0:
+                buckets[str(key)] = buckets.get(str(key), Decimal("0")) + w
+        if not buckets:
+            return _unclassified(notes=["yfinance sector data empty"])
+        notes: list[str] = []
+        buckets = _normalize_buckets(buckets, notes, preserve_excess=False)
+        return DimensionBreakdown(
+            buckets=buckets, source="provider", as_of=None, notes=notes
+        )
 
     def _classify_geography(
         self,
@@ -199,3 +279,13 @@ class EtfLookthroughService:
             as_of=None,
             notes=[],
         )
+
+    # ------------------------------------------------------------------
+    # yfinance wrappers — kept thin so tests can mock yf.Ticker
+    # ------------------------------------------------------------------
+
+    def _get_funds_data(self, symbol: str):
+        return yf.Ticker(symbol).funds_data
+
+    def _get_info(self, symbol: str):
+        return yf.Ticker(symbol).info

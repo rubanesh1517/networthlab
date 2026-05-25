@@ -195,3 +195,230 @@ def test_override_asset_class_above_one_preserves_leverage(tmp_path):
     )
     assert result.asset_class.buckets["equity"] == Decimal("1.25")
     assert "leverage preserved" in result.asset_class.notes[0]
+
+
+# --- yfinance provider path (Task 5) -----------------------------------
+
+
+@pytest.fixture
+def fake_funds_data():
+    """Synthetic yfinance.Ticker(symbol).funds_data shape."""
+
+    class FakeFundsData:
+        sector_weightings = {
+            "technology": 0.5,
+            "financials": 0.3,
+            "healthcare": 0.2,
+        }
+        asset_classes = {
+            "stockPosition": 0.99,
+            "cashPosition": 0.01,
+            "bondPosition": 0.0,
+        }
+
+        class FakeTopHoldings:
+            def to_dict(self_inner):
+                return {}
+
+        top_holdings = FakeTopHoldings()
+
+    return FakeFundsData()
+
+
+def test_etf_uses_provider_when_override_says_provider(mocker, fake_funds_data, tmp_path):
+    mock_ticker = mocker.patch("networthlab.services.etf_lookthrough.yf.Ticker")
+    mock_ticker.return_value.funds_data = fake_funds_data
+
+    bundle = make_override_bundle(
+        "FAKE.TO",
+        asset_class="provider",
+        sector="provider",
+        geography={"US": Decimal("1.0")},
+        as_of=date(2026, 1, 1),
+    )
+    svc = EtfLookthroughService(
+        overrides=bundle, complex_flags={}, cache_dir=tmp_path,
+    )
+    result = svc.classify(
+        symbol="FAKE.TO",
+        security_type="ETF",
+        name="Fake ETF",
+        listing_exchange="TSX",
+        listing_currency="CAD",
+    )
+    assert result.asset_class.source == "provider"
+    assert result.asset_class.buckets["equity"] == Decimal("0.99")
+    assert result.asset_class.buckets["cash"] == Decimal("0.01")
+    assert result.sector.source == "provider"
+    assert result.sector.buckets["technology"] == Decimal("0.5")
+    assert result.geography.source == "override"
+
+
+def test_etf_provider_missing_fields_yields_unclassified(mocker, tmp_path):
+    class EmptyFundsData:
+        sector_weightings = {}
+        asset_classes = {}
+
+        class FakeTopHoldings:
+            def to_dict(self_inner):
+                return {}
+
+        top_holdings = FakeTopHoldings()
+
+    mock_ticker = mocker.patch("networthlab.services.etf_lookthrough.yf.Ticker")
+    mock_ticker.return_value.funds_data = EmptyFundsData()
+
+    svc = EtfLookthroughService(
+        overrides=SecurityOverrideBundle(stale_after_days=180, securities={}),
+        complex_flags={},
+        cache_dir=tmp_path,
+    )
+    result = svc.classify(
+        symbol="EMPTY.TO",
+        security_type="ETF",
+        name="Empty ETF",
+        listing_exchange="TSX",
+        listing_currency="CAD",
+    )
+    assert result.asset_class.source == "unclassified"
+    assert result.sector.source == "unclassified"
+    assert result.asset_class.buckets == {}
+
+
+def test_non_etf_asset_class_from_security_type(tmp_path):
+    svc = EtfLookthroughService(
+        overrides=SecurityOverrideBundle(stale_after_days=180, securities={}),
+        complex_flags={},
+        cache_dir=tmp_path,
+        yfinance_disabled=True,
+    )
+    result_eq = svc.classify(
+        symbol="SHOP.TO",
+        security_type="EQUITY",
+        name="Shopify Inc",
+        listing_exchange="TSX",
+        listing_currency="CAD",
+    )
+    assert result_eq.asset_class.source == "heuristic"
+    assert result_eq.asset_class.buckets == {"equity": Decimal("1.0")}
+
+    result_crypto = svc.classify(
+        symbol="BTC",
+        security_type="CRYPTO",
+        name="Bitcoin",
+        listing_exchange="WS_CRYPTO",
+        listing_currency="CAD",
+    )
+    assert result_crypto.asset_class.buckets == {"crypto": Decimal("1.0")}
+
+
+def test_non_etf_sector_from_yfinance_info(mocker, tmp_path):
+    mock_ticker = mocker.patch("networthlab.services.etf_lookthrough.yf.Ticker")
+    mock_ticker.return_value.info = {"sector": "Technology", "quoteType": "EQUITY"}
+
+    svc = EtfLookthroughService(
+        overrides=SecurityOverrideBundle(stale_after_days=180, securities={}),
+        complex_flags={},
+        cache_dir=tmp_path,
+    )
+    result = svc.classify(
+        symbol="AAPL",
+        security_type="EQUITY",
+        name="Apple Inc",
+        listing_exchange="NASDAQ",
+        listing_currency="USD",
+    )
+    assert result.sector.source == "provider"
+    assert result.sector.buckets == {"technology": Decimal("1.0")}
+
+
+# --- Weight normalization (Task 5 follow-up) ---------------------------
+
+def _make_fd(sector_weightings=None, asset_classes=None):
+    class FD:
+        pass
+
+    FD.sector_weightings = sector_weightings or {}
+    FD.asset_classes = asset_classes or {}
+
+    class TH:
+        def to_dict(self_inner):
+            return {}
+
+    FD.top_holdings = TH()
+    return FD()
+
+
+def test_provider_sector_weights_below_1_renormalized(mocker, tmp_path):
+    mocker.patch(
+        "networthlab.services.etf_lookthrough.yf.Ticker"
+    ).return_value.funds_data = _make_fd(
+        sector_weightings={"tech": 0.5, "financials": 0.3, "healthcare": 0.17},
+        asset_classes={"stockPosition": 1.0},
+    )
+    bundle = make_override_bundle(
+        "DRIFT.TO",
+        asset_class={"equity": Decimal("1.0")},
+        sector="provider",
+        geography={"US": Decimal("1.0")},
+    )
+    svc = EtfLookthroughService(overrides=bundle, complex_flags={}, cache_dir=tmp_path)
+    result = svc.classify("DRIFT.TO", "ETF", "Drift", "TSX", "CAD")
+    total = sum(result.sector.buckets.values())
+    assert abs(total - Decimal("1")) < Decimal("0.0001")
+    assert any("renormalized" in n for n in result.sector.notes)
+
+
+def test_provider_sector_weights_above_1_renormalized(mocker, tmp_path):
+    mocker.patch(
+        "networthlab.services.etf_lookthrough.yf.Ticker"
+    ).return_value.funds_data = _make_fd(
+        sector_weightings={"tech": 0.6, "financials": 0.5},
+        asset_classes={"stockPosition": 1.0},
+    )
+    bundle = make_override_bundle(
+        "DRIFT2.TO",
+        asset_class={"equity": Decimal("1.0")},
+        sector="provider",
+        geography={"US": Decimal("1.0")},
+    )
+    svc = EtfLookthroughService(overrides=bundle, complex_flags={}, cache_dir=tmp_path)
+    result = svc.classify("DRIFT2.TO", "ETF", "Drift", "TSX", "CAD")
+    total = sum(result.sector.buckets.values())
+    assert abs(total - Decimal("1")) < Decimal("0.0001")
+
+
+def test_provider_asset_class_sub_one_adds_other_remainder(mocker, tmp_path):
+    mocker.patch(
+        "networthlab.services.etf_lookthrough.yf.Ticker"
+    ).return_value.funds_data = _make_fd(
+        asset_classes={"stockPosition": 0.95},
+    )
+    bundle = make_override_bundle(
+        "GAP.TO",
+        asset_class="provider",
+        sector={"tech": Decimal("1.0")},
+        geography={"US": Decimal("1.0")},
+    )
+    svc = EtfLookthroughService(overrides=bundle, complex_flags={}, cache_dir=tmp_path)
+    result = svc.classify("GAP.TO", "ETF", "Gap", "TSX", "CAD")
+    assert result.asset_class.buckets["equity"] == Decimal("0.95")
+    assert result.asset_class.buckets["other"] == Decimal("0.05")
+
+
+def test_provider_asset_class_above_one_preserves_leverage(mocker, tmp_path):
+    mocker.patch(
+        "networthlab.services.etf_lookthrough.yf.Ticker"
+    ).return_value.funds_data = _make_fd(
+        asset_classes={"stockPosition": 1.24, "cashPosition": -0.24},
+    )
+    bundle = make_override_bundle(
+        "LEV.TO",
+        asset_class="provider",
+        sector={"tech": Decimal("1.0")},
+        geography={"US": Decimal("1.0")},
+    )
+    svc = EtfLookthroughService(overrides=bundle, complex_flags={}, cache_dir=tmp_path)
+    result = svc.classify("LEV.TO", "ETF", "Lev", "TSX", "CAD")
+    assert result.asset_class.buckets["equity"] == Decimal("1.24")
+    assert "leverage preserved" in result.asset_class.notes[0]
