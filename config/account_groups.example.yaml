@@ -1,0 +1,25 @@
+# Account grouping rules — TEMPLATE.
+# Copy to ~/.networthlab/account_groups.yaml and edit to taste.
+# Rules evaluated top-to-bottom; first match wins.
+# Nickname matches use glob (fnmatch). Type matches against WS unifiedAccountType.
+
+groups:
+  - name: "Custom Group"
+    match: { nicknames: ["*Nickname Pattern*"] }
+    icon: "home"
+
+  - name: Retirement
+    match: { types: [RRSP, LIRA, RRIF, SPOUSAL_RRSP] }
+    icon: "piggy-bank"
+
+  - name: Tax Free Saving
+    match: { types: [TFSA] }
+    icon: "shield-check"
+
+  - name: Education Saving
+    match: { types: [RESP] }
+    icon: "graduation-cap"
+
+  - name: Long Term Investment
+    match: { types: [NON_REGISTERED, CASH, CRYPTO] }
+    icon: "trending-up"

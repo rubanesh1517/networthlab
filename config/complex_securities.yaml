@@ -1,0 +1,12 @@
+# Leveraged, inverse, and derivative-based products.
+# Surfaces a red "leverage" chip on any tile containing a held position
+# whose symbol appears here.
+
+HYLD.TO: { flag: covered_call_leverage, leverage: 1.25 }
+HMAX.TO: { flag: covered_call, leverage: 1.0 }
+QMAX.TO: { flag: covered_call, leverage: 1.0 }
+SMAX.TO: { flag: covered_call, leverage: 1.0 }
+HQU.TO:  { flag: leveraged_2x_long, leverage: 2.0 }
+HSU.TO:  { flag: leveraged_2x_long, leverage: 2.0 }
+HXD.TO:  { flag: leveraged_inverse, leverage: -1.0 }
+HSD.TO:  { flag: leveraged_2x_inverse, leverage: -2.0 }

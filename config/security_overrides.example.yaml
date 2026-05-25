@@ -1,0 +1,99 @@
+# Security classification overrides — committed generic curation.
+# User-specific overrides live at ~/.networthlab/security_overrides.yaml
+# and take precedence per-symbol.
+
+stale_after_days: 180        # gray "review override" chip threshold
+
+securities:
+  # Vanguard CA all-in-one ETFs (fund-of-funds; geography from sub-fund weights)
+  VEQT.TO:
+    asset_class: { equity: 1.0 }
+    sector: provider
+    geography: { US: 0.447, CAN: 0.305, INTL_DEV: 0.176, EM: 0.072 }
+    as_of: "2026-05-24"
+  VGRO.TO:
+    asset_class: { equity: 0.8, bond: 0.2 }
+    sector: provider
+    geography: { US: 0.358, CAN: 0.245, INTL_DEV: 0.142, EM: 0.058, BOND_GLOBAL: 0.197 }
+    as_of: "2026-05-24"
+  VBAL.TO:
+    asset_class: { equity: 0.6, bond: 0.4 }
+    sector: provider
+    geography: { US: 0.269, CAN: 0.184, INTL_DEV: 0.106, EM: 0.043, BOND_GLOBAL: 0.398 }
+    as_of: "2026-05-24"
+
+  # iShares CA all-in-one ETFs
+  XEQT.TO:
+    asset_class: { equity: 1.0 }
+    sector: provider
+    geography: { US: 0.442, CAN: 0.258, INTL_DEV: 0.246, EM: 0.054 }
+    as_of: "2026-05-24"
+  XGRO.TO:
+    asset_class: { equity: 0.8, bond: 0.2 }
+    sector: provider
+    geography: { US: 0.354, CAN: 0.206, INTL_DEV: 0.197, EM: 0.043, BOND_GLOBAL: 0.200 }
+    as_of: "2026-05-24"
+  XBAL.TO:
+    asset_class: { equity: 0.6, bond: 0.4 }
+    sector: provider
+    geography: { US: 0.266, CAN: 0.155, INTL_DEV: 0.148, EM: 0.032, BOND_GLOBAL: 0.399 }
+    as_of: "2026-05-24"
+
+  # Single-region equity ETFs
+  VFV.TO:
+    asset_class: { equity: 1.0 }
+    sector: provider
+    geography: { US: 1.0 }
+    as_of: "2026-05-24"
+  VUN.TO:
+    asset_class: { equity: 1.0 }
+    sector: provider
+    geography: { US: 1.0 }
+    as_of: "2026-05-24"
+  VCN.TO:
+    asset_class: { equity: 1.0 }
+    sector: provider
+    geography: { CAN: 1.0 }
+    as_of: "2026-05-24"
+  VIU.TO:
+    asset_class: { equity: 1.0 }
+    sector: provider
+    geography: { INTL_DEV: 1.0 }
+    as_of: "2026-05-24"
+  VEE.TO:
+    asset_class: { equity: 1.0 }
+    sector: provider
+    geography: { EM: 1.0 }
+    as_of: "2026-05-24"
+  XIC.TO:
+    asset_class: { equity: 1.0 }
+    sector: provider
+    geography: { CAN: 1.0 }
+    as_of: "2026-05-24"
+  ZSP.TO:
+    asset_class: { equity: 1.0 }
+    sector: provider
+    geography: { US: 1.0 }
+    as_of: "2026-05-24"
+
+  # US-listed popular ETFs
+  VOO:
+    asset_class: { equity: 1.0 }
+    sector: provider
+    geography: { US: 1.0 }
+    as_of: "2026-05-24"
+  VTI:
+    asset_class: { equity: 1.0 }
+    sector: provider
+    geography: { US: 1.0 }
+    as_of: "2026-05-24"
+  QQQ:
+    asset_class: { equity: 1.0 }
+    sector: provider
+    geography: { US: 1.0 }
+    as_of: "2026-05-24"
+  QQQM:
+    asset_class: { equity: 1.0 }
+    sector: provider
+    geography: { US: 1.0 }
+    as_of: "2026-05-24"
