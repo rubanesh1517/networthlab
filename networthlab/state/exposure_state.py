@@ -200,16 +200,16 @@ class ExposureState(rx.State):
                 for cls in classifications.values()
             )
 
-        # Portfolio-wide signals that appear on every tile per spec §9.5:
-        # Leverage / Review complex / Stale data are not dim-specific — they
-        # apply to the whole snapshot, so each tile surfaces them too.
-        portfolio_chips: list[str] = []
-        if self.has_leverage:
-            portfolio_chips.append("leverage")
-        if self.has_review_complex:
-            portfolio_chips.append("review_complex")
-        if result.stale_minutes > 60:
-            portfolio_chips.append("stale_cache")
+        # Portfolio-wide chips:
+        #   - leverage / review_complex are leverage-domain signals; show ONLY
+        #     on the Asset Class tile where the signal originates (equity > 1).
+        #     Showing them on every tile is noisy (Currency / Account Groups
+        #     have nothing to do with leverage).
+        #   - stale_cache reflects the whole-snapshot freshness; show on every
+        #     tile so the user always sees it.
+        cache_stale_chip: list[str] = (
+            ["stale_cache"] if result.stale_minutes > 60 else []
+        )
 
         def _build_chips(dim: str, dim_attr: str | None = None) -> list[str]:
             chips: list[str] = []
@@ -217,10 +217,15 @@ class ExposureState(rx.State):
                 chips.append("unclassified")
             if dim_attr and _dim_has_stale_override(dim_attr):
                 chips.append("stale_override")
-            chips.extend(portfolio_chips)
+            chips.extend(cache_stale_chip)
             return chips
 
-        self.asset_class_chips = _build_chips("asset_class", "asset_class")
+        asset_class_chips = _build_chips("asset_class", "asset_class")
+        if self.has_leverage:
+            asset_class_chips.append("leverage")
+        if self.has_review_complex:
+            asset_class_chips.append("review_complex")
+        self.asset_class_chips = asset_class_chips
         self.geography_chips = _build_chips("geography", "geography")
         self.sector_chips = _build_chips("sector", "sector")
         self.currency_chips = _build_chips("currency")

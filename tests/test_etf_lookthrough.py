@@ -249,7 +249,7 @@ def test_etf_uses_provider_when_override_says_provider(mocker, fake_funds_data, 
     assert result.asset_class.buckets["equity"] == Decimal("0.99")
     assert result.asset_class.buckets["cash"] == Decimal("0.01")
     assert result.sector.source == "provider"
-    assert result.sector.buckets["technology"] == Decimal("0.5")
+    assert result.sector.buckets["Technology"] == Decimal("0.5")
     assert result.geography.source == "override"
 
 
@@ -307,7 +307,7 @@ def test_ws_exchange_traded_fund_security_type_is_treated_as_etf(mocker, tmp_pat
     )
     # Got real provider data from funds_data, not unclassified.
     assert result.sector.source == "provider"
-    assert result.sector.buckets["technology"] == Decimal("0.5")
+    assert result.sector.buckets["Technology"] == Decimal("0.5")
     assert result.asset_class.source == "provider"
     assert result.asset_class.buckets["equity"] == Decimal("0.99")
 
@@ -375,7 +375,7 @@ def test_non_etf_sector_from_yfinance_info(mocker, tmp_path):
         listing_currency="USD",
     )
     assert result.sector.source == "provider"
-    assert result.sector.buckets == {"technology": Decimal("1.0")}
+    assert result.sector.buckets == {"Technology": Decimal("1.0")}
 
 
 # --- Weight normalization (Task 5 follow-up) ---------------------------

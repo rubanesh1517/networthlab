@@ -45,6 +45,23 @@ def _unclassified(notes: list[str] | None = None) -> DimensionBreakdown:
     )
 
 
+def _normalize_sector_key(raw: str) -> str:
+    """Canonicalize sector bucket keys so different providers' shapes merge.
+
+    yfinance returns ETF sector_weightings as snake_case ("consumer_cyclical",
+    "financial_services") and stock info["sector"] as Title Case with spaces
+    ("Consumer Cyclical", "Financial Services"). Aggregating without
+    normalization produces duplicate buckets like 'financial services' AND
+    'financial_services' in the same tile.
+
+    Canonical form: Title Case with single spaces. Examples:
+      'consumer_cyclical' -> 'Consumer Cyclical'
+      'Financial Services' -> 'Financial Services'
+      'COMMUNICATION_SERVICES' -> 'Communication Services'
+    """
+    return raw.replace("_", " ").strip().title()
+
+
 # Float drift below this is treated as "essentially 1.0" — no normalization.
 # 0.001 catches publisher rounding (e.g., VEQT geography 1.003) while ignoring
 # yfinance's float-precision noise (~1e-6).
@@ -361,7 +378,8 @@ class EtfLookthroughService:
         for key, weight in raw.items():
             w = Decimal(str(weight))
             if w > 0:
-                buckets[str(key)] = buckets.get(str(key), Decimal("0")) + w
+                bucket = _normalize_sector_key(str(key))
+                buckets[bucket] = buckets.get(bucket, Decimal("0")) + w
         if not buckets:
             return _unclassified(notes=["yfinance sector data empty"])
         notes: list[str] = []
