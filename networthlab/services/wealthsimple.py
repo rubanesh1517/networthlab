@@ -105,6 +105,11 @@ class WealthsimpleService:
                 {
                     "identityId": api.get_token_info().get("identity_canonical_id"),
                     "currency": "CAD",
+                    # currencyOverride controls per-position totalValue
+                    # conversion — without it WS returns each position's
+                    # native-currency value (USD for NASDAQ/NYSE listings)
+                    # which then gets misread as CAD downstream.
+                    "currencyOverride": "CAD",
                     "filter": {"securityIds": None},
                     "first": 100,
                     "aggregated": False,
@@ -133,7 +138,12 @@ class WealthsimpleService:
         edges: list[dict], accounts: list[dict]
     ) -> list[Position]:
         accounts_by_id = {acct["id"]: acct for acct in accounts}
-        positions: list[Position] = []
+        # WS occasionally returns the same (account, security) pair more than
+        # once across edges (e.g. when a security exists in multiple accounts
+        # and the response still aggregates the accounts list per edge). Dedup
+        # by (account_id, symbol) so we never double-count a single position
+        # toward the per-account-type totals.
+        deduped: dict[tuple[str, str], Position] = {}
         for edge in edges:
             node = edge.get("node", edge)
             security = node.get("security") or {}
@@ -156,23 +166,24 @@ class WealthsimpleService:
                 continue
 
             for account_id in account_ids:
+                key = (account_id, symbol)
+                if key in deduped:
+                    continue  # WS already gave us this (account, symbol)
                 acct = accounts_by_id.get(account_id, {})
-                positions.append(
-                    Position(
-                        account_id=account_id,
-                        account_type=acct.get("unifiedAccountType", "UNKNOWN"),
-                        account_nickname=acct.get("nickname", "") or "",
-                        symbol=symbol,
-                        name=name,
-                        security_type=security_type,
-                        listing_currency=listing_currency,
-                        listing_exchange=listing_exchange,
-                        quantity=Decimal(str(qty)),
-                        market_value_cad=Decimal(str(value)),
-                        book_value_cad=Decimal(str(book)),
-                    )
+                deduped[key] = Position(
+                    account_id=account_id,
+                    account_type=acct.get("unifiedAccountType", "UNKNOWN"),
+                    account_nickname=acct.get("nickname", "") or "",
+                    symbol=symbol,
+                    name=name,
+                    security_type=security_type,
+                    listing_currency=listing_currency,
+                    listing_exchange=listing_exchange,
+                    quantity=Decimal(str(qty)),
+                    market_value_cad=Decimal(str(value)),
+                    book_value_cad=Decimal(str(book)),
                 )
-        return positions
+        return list(deduped.values())
 
     def _cache_path(self) -> Path:
         return self.cache_dir / CACHE_FILE_NAME

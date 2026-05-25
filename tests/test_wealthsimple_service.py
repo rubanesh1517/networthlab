@@ -137,7 +137,37 @@ def test_fetch_positions_paginates_and_disables_aggregation(mocker, tmp_path):
     variables = call.args[1]
     assert variables["first"] == 100
     assert variables["aggregated"] is False
+    # currencyOverride forces per-position totalValue conversion to CAD.
+    # Without it, USD-listed positions come back at their USD amount and
+    # get silently misread as CAD in the dashboard (~$20K under-counting
+    # in the RRSP tile on a real portfolio).
+    assert variables["currencyOverride"] == "CAD"
     assert call.kwargs.get("load_all_pages") is True
+
+
+def test_fetch_positions_dedupes_account_symbol_pairs(mocker, tmp_path):
+    """If WS returns the same (account, symbol) more than once (which
+    happens when aggregated=False still groups account ids per security),
+    the second occurrence must be discarded — not appended as a duplicate
+    Position that would double-count value into the per-account totals."""
+    mock_api = mocker.MagicMock()
+    mock_api.get_accounts.return_value = [make_account("a1", "RRSP", "R")]
+    mock_api.get_token_info.return_value = {"identity_canonical_id": "id"}
+    pos = make_position("AMD", "2554.38", "a1", "EQUITY", exchange="NASDAQ")
+    mock_api.do_graphql_query.return_value = [
+        {"node": pos},
+        {"node": pos},  # duplicate edge for the same (account, symbol)
+    ]
+    mocker.patch(
+        "networthlab.services.wealthsimple.WealthsimpleAPI.from_token",
+        return_value=mock_api,
+    )
+    svc = WealthsimpleService(cache_dir=tmp_path)
+    svc._session_override = mocker.MagicMock(access_token="x")
+    result = svc.fetch_positions()
+    assert len(result.positions) == 1
+    assert result.positions[0].symbol == "AMD"
+    assert result.positions[0].market_value_cad == Decimal("2554.38")
 
 
 def test_fetch_positions_raises_auth_missing_on_manual_login_required(mocker, tmp_path):
