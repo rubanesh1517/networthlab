@@ -66,10 +66,24 @@ _SECURITY_TYPE_ASSET_CLASS = {
     "EQUITY": "equity",
     "STOCK": "equity",
     "ETF": "equity",
+    "EXCHANGE_TRADED_FUND": "equity",   # WS variant
+    "MUTUAL_FUND": "equity",
     "BOND": "bond",
     "CRYPTO": "crypto",
+    "CRYPTOCURRENCY": "crypto",         # WS variant
     "CASH": "cash",
     "OPTION": "option",
+}
+
+# WS security_type strings that mean "this is a fund" — the ETF classification
+# chain (funds_data.asset_classes, sector_weightings, top_holdings) applies.
+# Without this set, WS's "EXCHANGE_TRADED_FUND" was being treated as an
+# individual stock and falling through to info["sector"] which doesn't exist
+# for funds, leaving every held ETF unclassified.
+_ETF_LIKE_SECURITY_TYPES: set[str] = {
+    "ETF",
+    "EXCHANGE_TRADED_FUND",
+    "MUTUAL_FUND",
 }
 
 # Name-pattern -> country (geography, ETF only). First match wins.
@@ -253,7 +267,7 @@ class EtfLookthroughService:
         listing_currency: str,
     ) -> SecurityClassification:
         override = self.overrides.securities.get(symbol)
-        is_etf = security_type.upper() == "ETF"
+        is_etf = security_type.upper() in _ETF_LIKE_SECURITY_TYPES
 
         asset_class = self._classify_asset_class(override, is_etf, security_type, symbol)
         sector = self._classify_sector(override, is_etf, symbol)

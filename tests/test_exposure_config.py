@@ -76,6 +76,20 @@ def test_match_account_group_unmatched_returns_other():
     assert matched == "Other"
 
 
+def test_match_account_group_type_handles_ws_prefixed_string():
+    """Real WS unifiedAccountType values are prefixed (SELF_DIRECTED_RRSP,
+    SELF_DIRECTED_TFSA, etc.). A rule that says 'RRSP' must still hit them."""
+    rules = [
+        AccountGroupRule(name="Retirement", nicknames=[], types=["RRSP"], icon=""),
+        AccountGroupRule(name="Tax Free Saving", nicknames=[], types=["TFSA"], icon=""),
+    ]
+    assert match_account_group("any", "SELF_DIRECTED_RRSP", rules) == "Retirement"
+    assert match_account_group("any", "MANAGED_RRSP", rules) == "Retirement"
+    assert match_account_group("any", "SELF_DIRECTED_TFSA", rules) == "Tax Free Saving"
+    # Exact matches still work.
+    assert match_account_group("any", "RRSP", rules) == "Retirement"
+
+
 def test_match_account_group_empty_rules_returns_other():
     matched = match_account_group(nickname="Anything", account_type="RRSP", rules=[])
     assert matched == "Other"

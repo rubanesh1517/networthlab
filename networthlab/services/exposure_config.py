@@ -74,6 +74,19 @@ def load_account_groups(path: Path) -> list[AccountGroupRule]:
     return rules
 
 
+def _type_matches(account_type: str, rule_type: str) -> bool:
+    """Match a YAML rule type against a WS unifiedAccountType.
+
+    WS prefixes vary by product (e.g. "SELF_DIRECTED_RRSP", "MANAGED_RRSP",
+    "GROUP_RRSP"); the YAML usually says just "RRSP". We accept exact match
+    AND substring match-against-WS so "RRSP" hits "SELF_DIRECTED_RRSP".
+    Comparison is uppercase to stay tolerant of casing.
+    """
+    a = account_type.upper()
+    r = rule_type.upper()
+    return a == r or r in a
+
+
 def match_account_group(
     nickname: str, account_type: str, rules: list[AccountGroupRule]
 ) -> str:
@@ -81,7 +94,7 @@ def match_account_group(
     for rule in rules:
         if any(fnmatch.fnmatchcase(nickname, pat) for pat in rule.nicknames):
             return rule.name
-        if account_type in rule.types:
+        if any(_type_matches(account_type, t) for t in rule.types):
             return rule.name
     return "Other"
 

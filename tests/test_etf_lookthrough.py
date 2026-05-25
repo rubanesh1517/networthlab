@@ -284,6 +284,53 @@ def test_etf_provider_missing_fields_yields_unclassified(mocker, tmp_path):
     assert result.asset_class.buckets == {}
 
 
+def test_ws_exchange_traded_fund_security_type_is_treated_as_etf(mocker, tmp_path, fake_funds_data):
+    """WS returns 'EXCHANGE_TRADED_FUND' (not 'ETF'). Must hit the ETF
+    classification chain so sector lookups go to funds_data.sector_weightings,
+    not info['sector'] (which doesn't exist for funds)."""
+    mocker.patch(
+        "networthlab.services.etf_lookthrough.yf.Ticker"
+    ).return_value.funds_data = fake_funds_data
+    bundle = make_override_bundle(
+        "FAKE.TO",
+        asset_class="provider",
+        sector="provider",
+        geography={"US": Decimal("1.0")},
+    )
+    svc = EtfLookthroughService(overrides=bundle, complex_flags={}, cache_dir=tmp_path)
+    result = svc.classify(
+        symbol="FAKE.TO",
+        security_type="EXCHANGE_TRADED_FUND",  # WS shape, NOT "ETF"
+        name="Fake Fund",
+        listing_exchange="TSX",
+        listing_currency="CAD",
+    )
+    # Got real provider data from funds_data, not unclassified.
+    assert result.sector.source == "provider"
+    assert result.sector.buckets["technology"] == Decimal("0.5")
+    assert result.asset_class.source == "provider"
+    assert result.asset_class.buckets["equity"] == Decimal("0.99")
+
+
+def test_ws_cryptocurrency_security_type_classified_as_crypto(tmp_path):
+    """WS returns 'CRYPTOCURRENCY' (not 'CRYPTO'). Must classify asset_class as crypto."""
+    svc = EtfLookthroughService(
+        overrides=SecurityOverrideBundle(stale_after_days=180, securities={}),
+        complex_flags={},
+        cache_dir=tmp_path,
+        yfinance_disabled=True,
+    )
+    result = svc.classify(
+        symbol="BTC",
+        security_type="CRYPTOCURRENCY",
+        name="Bitcoin",
+        listing_exchange="",
+        listing_currency="CAD",
+    )
+    assert result.asset_class.source == "heuristic"
+    assert result.asset_class.buckets == {"crypto": Decimal("1.0")}
+
+
 def test_non_etf_asset_class_from_security_type(tmp_path):
     svc = EtfLookthroughService(
         overrides=SecurityOverrideBundle(stale_after_days=180, securities={}),
