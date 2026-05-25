@@ -18,6 +18,42 @@ KEYRING_SERVICE = "lunchsimple"
 KEYRING_KEY = "session"
 CACHE_FILE_NAME = "positions_cache.json"
 
+# Wealthsimple returns bare symbols (e.g. "VEQT", "XEQT") that omit the exchange
+# suffix yfinance and our security_overrides YAML require. Map primaryExchange ->
+# the yfinance-compatible suffix and append it when missing.
+_YFINANCE_SUFFIX_BY_EXCHANGE: dict[str, str] = {
+    "TSX": ".TO",
+    "TSX VENTURE": ".V",
+    "TSXV": ".V",
+    "NEO": ".NE",
+    "CSE": ".CN",
+    "LSE": ".L",
+    "FRA": ".F",
+    "ETR": ".DE",
+    "TYO": ".T",
+    "ASX": ".AX",
+    "HKEX": ".HK",
+    # US exchanges have no suffix in yfinance:
+    "NASDAQ": "",
+    "NYSE": "",
+    "AMEX": "",
+    "ARCA": "",
+    "BATS": "",
+    "NMS": "",
+}
+
+
+def _normalize_symbol(raw_symbol: str, listing_exchange: str) -> str:
+    """Append the yfinance-style exchange suffix when the WS-returned symbol
+    is bare (no dot). Leaves any already-suffixed symbol (e.g. "QQC.F",
+    "VEQT.TO") alone. Unknown exchanges pass through unchanged."""
+    if not raw_symbol or "." in raw_symbol:
+        return raw_symbol
+    suffix = _YFINANCE_SUFFIX_BY_EXCHANGE.get(listing_exchange.upper())
+    if suffix is None or suffix == "":
+        return raw_symbol
+    return f"{raw_symbol}{suffix}"
+
 
 class WealthsimpleAuthError(RuntimeError):
     """Raised when no session is available — UI should show a 'run lunchsimple login' banner."""
@@ -102,11 +138,14 @@ class WealthsimpleService:
             node = edge.get("node", edge)
             security = node.get("security") or {}
             stock = security.get("stock") or {}
-            symbol = stock.get("symbol") or security.get("id", "UNKNOWN")
-            name = stock.get("name") or symbol
+            raw_symbol = stock.get("symbol") or security.get("id", "UNKNOWN")
             security_type = security.get("securityType") or "EQUITY"
             listing_currency = security.get("currency") or "CAD"
             listing_exchange = stock.get("primaryExchange") or ""
+            # Normalize WS bare tickers (VEQT -> VEQT.TO) so override YAML
+            # lookups AND yfinance fetches use the same form.
+            symbol = _normalize_symbol(raw_symbol, listing_exchange)
+            name = stock.get("name") or symbol
 
             value = (node.get("totalValue") or {}).get("amount", "0")
             book = (node.get("marketBookValue") or {}).get("amount", "0")

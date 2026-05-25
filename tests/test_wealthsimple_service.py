@@ -10,6 +10,7 @@ from networthlab.services.wealthsimple import (
     PositionsResult,
     WealthsimpleAuthError,
     WealthsimpleService,
+    _normalize_symbol,
 )
 
 
@@ -21,7 +22,13 @@ def make_account(account_id: str, type_: str, nickname: str) -> dict:
     }
 
 
-def make_position(symbol: str, value_cad: str, account_id: str, security_type: str = "EQUITY"):
+def make_position(
+    symbol: str,
+    value_cad: str,
+    account_id: str,
+    security_type: str = "EQUITY",
+    exchange: str = "TSX",
+):
     return {
         "id": f"pos-{symbol}-{account_id}",
         "accounts": [{"id": account_id}],
@@ -36,7 +43,7 @@ def make_position(symbol: str, value_cad: str, account_id: str, security_type: s
             "stock": {
                 "symbol": symbol,
                 "name": f"{symbol} Inc",
-                "primaryExchange": "TSX",
+                "primaryExchange": exchange,
             },
         },
     }
@@ -65,8 +72,8 @@ def test_fetch_positions_normalizes_and_writes_cache(mocker, tmp_path):
     ]
     mock_api.get_token_info.return_value = {"identity_canonical_id": "identity-1"}
     mock_api.do_graphql_query.return_value = [
-        {"node": make_position("VEQT.TO", "5000", "acct-1", "ETF")},
-        {"node": make_position("AAPL", "1500", "acct-2", "EQUITY")},
+        {"node": make_position("VEQT.TO", "5000", "acct-1", "ETF", exchange="TSX")},
+        {"node": make_position("AAPL", "1500", "acct-2", "EQUITY", exchange="NASDAQ")},
     ]
     mocker.patch(
         "networthlab.services.wealthsimple.WealthsimpleAPI.from_token",
@@ -196,6 +203,57 @@ def test_fetch_positions_falls_back_to_cache_on_api_failure(mocker, tmp_path):
     assert result.stale_minutes >= 0
     assert len(result.positions) == 1
     assert result.warnings
+
+
+def test_normalize_symbol_adds_tsx_suffix():
+    """Wealthsimple returns 'VEQT'; yfinance + overrides need 'VEQT.TO'."""
+    assert _normalize_symbol("VEQT", "TSX") == "VEQT.TO"
+    assert _normalize_symbol("XEQT", "TSX") == "XEQT.TO"
+    assert _normalize_symbol("VFV", "TSX") == "VFV.TO"
+
+
+def test_normalize_symbol_leaves_us_symbols_alone():
+    """NASDAQ/NYSE listings need no suffix in yfinance."""
+    assert _normalize_symbol("AAPL", "NASDAQ") == "AAPL"
+    assert _normalize_symbol("VOO", "NYSE") == "VOO"
+    assert _normalize_symbol("QQQM", "NMS") == "QQQM"
+
+
+def test_normalize_symbol_passthrough_when_already_suffixed():
+    """If WS already gave us a suffix (e.g. 'QQC.F'), don't double-suffix."""
+    assert _normalize_symbol("QQC.F", "TSX") == "QQC.F"
+    assert _normalize_symbol("VEQT.TO", "TSX") == "VEQT.TO"
+
+
+def test_normalize_symbol_handles_other_exchanges():
+    assert _normalize_symbol("HXT", "TSXV") == "HXT.V"
+    assert _normalize_symbol("XYZ", "NEO") == "XYZ.NE"
+
+
+def test_normalize_symbol_unknown_exchange_passes_through():
+    assert _normalize_symbol("MYSTERY", "WS_INTERNAL") == "MYSTERY"
+    assert _normalize_symbol("BARE", "") == "BARE"
+
+
+def test_fetch_positions_normalizes_symbol_via_exchange(mocker, tmp_path):
+    """End-to-end: a bare WS symbol on TSX should land in Position.symbol as
+    'VEQT.TO' so override lookups + yfinance fetches both hit."""
+    mock_api = mocker.MagicMock()
+    mock_api.get_accounts.return_value = [make_account("acct-1", "RRSP", "My RRSP")]
+    mock_api.get_token_info.return_value = {"identity_canonical_id": "id"}
+    mock_api.do_graphql_query.return_value = [
+        {"node": make_position("VEQT", "5000", "acct-1", "ETF")},
+    ]
+    mocker.patch(
+        "networthlab.services.wealthsimple.WealthsimpleAPI.from_token",
+        return_value=mock_api,
+    )
+    svc = WealthsimpleService(cache_dir=tmp_path)
+    svc._session_override = mocker.MagicMock(access_token="x")
+
+    result = svc.fetch_positions()
+    assert len(result.positions) == 1
+    assert result.positions[0].symbol == "VEQT.TO"
 
 
 def test_fetch_positions_raises_when_no_session(mocker, tmp_path):
