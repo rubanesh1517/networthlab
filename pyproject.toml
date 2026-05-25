@@ -5,17 +5,22 @@ description = "Personal financial projection app powered by Lunch Money"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "reflex>=0.6.0",
+    "keyring>=25.0.0",
     "lunchable>=1.4.2",
     "pandas>=2.0.0",
     "pydantic>=2.0.0",
+    "pyyaml>=6.0",
     "python-dateutil>=2.8.2",
+    "reflex>=0.6.0",
+    "ws-api>=0.34.0",
+    "yfinance>=0.2.40",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.0.0",
+    "pytest-mock>=3.12.0",
     "ruff>=0.1.0",
 ]
 
