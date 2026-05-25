@@ -45,11 +45,10 @@ def exposure_donut(data: rx.Var, height: int = 230) -> rx.Component:
                 "? name + '  ' + (percent * 100).toFixed(1) + '%' "
                 ": ''"
             ),
-            label_line=rx.Var(
-                "({percent}) => percent >= 0.03 "
-                "? { stroke: '" + COLORS["text_secondary"] + "', strokeWidth: 1 } "
-                ": false"
-            ),
+            # No leader lines — clean modern donut. The legend below the
+            # chart lists every bucket regardless of slice size, and tiny
+            # slices still surface their $ value on hover via the tooltip.
+            label_line=False,
         ),
         currency_tooltip(),
         rx.recharts.legend(
