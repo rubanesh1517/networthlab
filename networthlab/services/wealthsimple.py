@@ -1,0 +1,163 @@
+"""Wealthsimple session handling and position fetch, normalized to `Position`."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from decimal import Decimal
+from pathlib import Path
+
+import keyring
+from ws_api import WealthsimpleAPI, WSAPISession
+from ws_api.exceptions import LoginFailedException, ManualLoginRequired
+
+from networthlab.models import Position
+
+KEYRING_SERVICE = "lunchsimple"
+KEYRING_KEY = "session"
+CACHE_FILE_NAME = "positions_cache.json"
+
+
+class WealthsimpleAuthMissing(RuntimeError):
+    """Raised when no session is available — UI should show a 'run lunchsimple login' banner."""
+
+
+@dataclass
+class PositionsResult:
+    positions: list[Position]
+    stale_minutes: int  # 0 when fresh; positive when rendered from cache fallback
+    warnings: list[str]
+
+
+class WealthsimpleService:
+    def __init__(self, cache_dir: Path):
+        self.cache_dir = cache_dir
+        self._session_override: WSAPISession | None = None
+
+    @staticmethod
+    def load_session() -> WSAPISession | None:
+        raw = keyring.get_password(KEYRING_SERVICE, KEYRING_KEY)
+        if not raw:
+            return None
+        try:
+            return WSAPISession.from_json(raw)
+        except Exception:
+            return None
+
+    @staticmethod
+    def persist_session(session_json: str) -> None:
+        keyring.set_password(KEYRING_SERVICE, KEYRING_KEY, session_json)
+
+    def fetch_positions(self) -> PositionsResult:
+        session = self._session_override or self.load_session()
+        if not session:
+            raise WealthsimpleAuthMissing(
+                "No Wealthsimple session found in keyring — run `lunchsimple login`."
+            )
+
+        try:
+            api = WealthsimpleAPI.from_token(session, self.persist_session)
+            accounts = api.get_accounts()
+            # ws_api 0.34.0's get_identity_positions() helper does NOT pass
+            # includeSecurity=True, and the GraphQL query gates the
+            # SecuritySummary fragment behind @include(if: $includeSecurity).
+            # Call do_graphql_query directly so we get the metadata.
+            # Also: first/aggregated/load_all_pages for full pagination.
+            edges = api.do_graphql_query(
+                "FetchIdentityPositions",
+                {
+                    "identityId": api.get_token_info().get("identity_canonical_id"),
+                    "currency": "CAD",
+                    "filter": {"securityIds": None},
+                    "first": 100,
+                    "aggregated": False,
+                    "includeAccountData": True,
+                    "includeSecurity": True,
+                },
+                "identity.financials.current.positions.edges",
+                "array",
+                load_all_pages=True,
+            )
+        except (ManualLoginRequired, LoginFailedException) as exc:
+            # Spec §10: surface auth banner, hide page body; NOT cache fallback.
+            raise WealthsimpleAuthMissing(
+                f"Wealthsimple session expired or invalid — run "
+                f"`lunchsimple login` to reconnect: {exc}"
+            ) from exc
+        except Exception as exc:
+            return self._render_from_cache(reason=f"WS API failed: {exc!s}")
+
+        positions = self._normalize_positions(edges, accounts)
+        self._write_cache(positions)
+        return PositionsResult(positions=positions, stale_minutes=0, warnings=[])
+
+    @staticmethod
+    def _normalize_positions(
+        edges: list[dict], accounts: list[dict]
+    ) -> list[Position]:
+        accounts_by_id = {acct["id"]: acct for acct in accounts}
+        positions: list[Position] = []
+        for edge in edges:
+            node = edge.get("node", edge)
+            security = node.get("security") or {}
+            stock = security.get("stock") or {}
+            symbol = stock.get("symbol") or security.get("id", "UNKNOWN")
+            name = stock.get("name") or symbol
+            security_type = security.get("securityType") or "EQUITY"
+            listing_currency = security.get("currency") or "CAD"
+            listing_exchange = stock.get("primaryExchange") or ""
+
+            value = (node.get("totalValue") or {}).get("amount", "0")
+            book = (node.get("marketBookValue") or {}).get("amount", "0")
+            qty = node.get("quantity") or "0"
+
+            account_ids = [a["id"] for a in (node.get("accounts") or [])]
+            if not account_ids:
+                continue
+
+            for account_id in account_ids:
+                acct = accounts_by_id.get(account_id, {})
+                positions.append(
+                    Position(
+                        account_id=account_id,
+                        account_type=acct.get("unifiedAccountType", "UNKNOWN"),
+                        account_nickname=acct.get("nickname", "") or "",
+                        symbol=symbol,
+                        name=name,
+                        security_type=security_type,
+                        listing_currency=listing_currency,
+                        listing_exchange=listing_exchange,
+                        quantity=Decimal(str(qty)),
+                        market_value_cad=Decimal(str(value)),
+                        book_value_cad=Decimal(str(book)),
+                    )
+                )
+        return positions
+
+    def _cache_path(self) -> Path:
+        return self.cache_dir / CACHE_FILE_NAME
+
+    def _write_cache(self, positions: list[Position]) -> None:
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "positions": [p.model_dump(mode="json") for p in positions],
+        }
+        self._cache_path().write_text(json.dumps(payload, indent=2, default=str))
+
+    def _render_from_cache(self, reason: str) -> PositionsResult:
+        path = self._cache_path()
+        if not path.is_file():
+            return PositionsResult(positions=[], stale_minutes=0, warnings=[reason])
+        data = json.loads(path.read_text())
+        positions = [Position.model_validate(p) for p in data["positions"]]
+        fetched = datetime.fromisoformat(data["fetched_at"])
+        stale_minutes = int(
+            (datetime.now(timezone.utc) - fetched).total_seconds() // 60
+        )
+        return PositionsResult(
+            positions=positions,
+            stale_minutes=max(stale_minutes, 1),
+            warnings=[reason, f"showing cached snapshot ({stale_minutes}m old)"],
+        )
