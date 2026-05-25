@@ -16,7 +16,8 @@ in Tasks 5-6.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import json
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Union
@@ -48,6 +49,9 @@ def _unclassified(notes: list[str] | None = None) -> DimensionBreakdown:
 # 0.001 catches publisher rounding (e.g., VEQT geography 1.003) while ignoring
 # yfinance's float-precision noise (~1e-6).
 _WEIGHT_DRIFT_TOLERANCE = Decimal("0.001")
+
+_CACHE_FILE_NAME = "yfinance_cache.json"
+_CACHE_TTL = timedelta(hours=24)
 
 _YF_ASSET_CLASS_MAP = {
     "stockPosition": "equity",
@@ -164,6 +168,23 @@ def _override_breakdown(
     return None
 
 
+class _DictAttr:
+    """Adapt a cached dict back to the yfinance funds_data shape so the rest
+    of the classifier doesn't care whether data came from cache or live."""
+
+    class _ToDict:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def to_dict(self):
+            return self._payload
+
+    def __init__(self, payload: dict):
+        self.sector_weightings = payload.get("sector_weightings", {})
+        self.asset_classes = payload.get("asset_classes", {})
+        self.top_holdings = _DictAttr._ToDict(payload.get("top_holdings", {}))
+
+
 class EtfLookthroughService:
     """Classify each held symbol into per-dimension breakdowns.
 
@@ -181,6 +202,47 @@ class EtfLookthroughService:
         self.complex_flags = complex_flags
         self.cache_dir = cache_dir
         self.yfinance_disabled = yfinance_disabled
+        self._cache: dict[str, dict] = self._load_cache()
+
+    # ------------------------------------------------------------------
+    # Disk cache (yfinance results)
+    # ------------------------------------------------------------------
+
+    def _cache_path(self) -> Path:
+        return self.cache_dir / _CACHE_FILE_NAME
+
+    def _load_cache(self) -> dict[str, dict]:
+        path = self._cache_path()
+        if not path.is_file():
+            return {}
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    def _save_cache(self) -> None:
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._cache_path().write_text(json.dumps(self._cache, indent=2, default=str))
+
+    def _cache_lookup(self, symbol: str, field: str):
+        entry = self._cache.get(symbol)
+        if not entry:
+            return None
+        try:
+            fetched = datetime.fromisoformat(entry["fetched_at"])
+        except (KeyError, ValueError):
+            return None
+        if datetime.now(timezone.utc) - fetched > _CACHE_TTL:
+            return None
+        return entry.get(field)
+
+    def _cache_store(self, symbol: str, field: str, value) -> None:
+        entry = self._cache.setdefault(
+            symbol, {"fetched_at": datetime.now(timezone.utc).isoformat()}
+        )
+        entry["fetched_at"] = datetime.now(timezone.utc).isoformat()
+        entry[field] = value
+        self._save_cache()
 
     def classify(
         self,
@@ -382,7 +444,47 @@ class EtfLookthroughService:
     # ------------------------------------------------------------------
 
     def _get_funds_data(self, symbol: str):
-        return yf.Ticker(symbol).funds_data
+        cached = self._cache_lookup(symbol, "funds_data")
+        if cached is not None:
+            return _DictAttr(cached)
+        raw = yf.Ticker(symbol).funds_data
+        snapshot = {
+            "sector_weightings": dict(getattr(raw, "sector_weightings", {}) or {}),
+            "asset_classes": dict(getattr(raw, "asset_classes", {}) or {}),
+            "top_holdings": (
+                raw.top_holdings.to_dict()
+                if getattr(raw, "top_holdings", None) is not None
+                and hasattr(raw.top_holdings, "to_dict")
+                else {}
+            ),
+        }
+        self._cache_store(symbol, "funds_data", snapshot)
+        return _DictAttr(snapshot)
 
     def _get_info(self, symbol: str):
-        return yf.Ticker(symbol).info
+        cached = self._cache_lookup(symbol, "info")
+        if cached is not None:
+            return cached
+        info = dict(yf.Ticker(symbol).info or {})
+        self._cache_store(symbol, "info", info)
+        return info
+
+    def is_override_stale(self, as_of: date | None) -> bool:
+        if as_of is None:
+            return False
+        return (date.today() - as_of).days > self.overrides.stale_after_days
+
+    def clear_symbols(self, symbols: list[str]) -> None:
+        """Evict the given symbols from the yfinance cache (spec §11).
+
+        Called by ExposureState.refresh so that a user-initiated refresh
+        actually re-fetches data for currently-held symbols instead of
+        re-reading the same 24h-cached snapshot.
+        """
+        changed = False
+        for symbol in symbols:
+            if symbol in self._cache:
+                del self._cache[symbol]
+                changed = True
+        if changed:
+            self._save_cache()

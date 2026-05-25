@@ -553,3 +553,82 @@ def test_etf_geography_listing_exchange_NOT_used_as_fallback(mocker, tmp_path):
     )
     assert result.geography.source == "unclassified"
     assert result.geography.buckets == {}
+
+
+# --- Cache + staleness (Task 7) ---------------------------------------
+
+
+def test_cache_avoids_second_yfinance_call(mocker, tmp_path, fake_funds_data):
+    mock_ticker = mocker.patch("networthlab.services.etf_lookthrough.yf.Ticker")
+    mock_ticker.return_value.funds_data = fake_funds_data
+
+    bundle = make_override_bundle("FAKE.TO", asset_class="provider", sector="provider")
+    svc = EtfLookthroughService(overrides=bundle, complex_flags={}, cache_dir=tmp_path)
+
+    svc.classify("FAKE.TO", "ETF", "Fake ETF", "TSX", "CAD")
+    svc.classify("FAKE.TO", "ETF", "Fake ETF", "TSX", "CAD")
+
+    assert mock_ticker.call_count == 1
+
+
+def test_cache_refetches_after_ttl_expires(mocker, tmp_path, fake_funds_data):
+    mock_ticker = mocker.patch("networthlab.services.etf_lookthrough.yf.Ticker")
+    mock_ticker.return_value.funds_data = fake_funds_data
+
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    bundle = make_override_bundle("FAKE.TO", asset_class="provider", sector="provider")
+    svc = EtfLookthroughService(overrides=bundle, complex_flags={}, cache_dir=tmp_path)
+    svc.classify("FAKE.TO", "ETF", "Fake ETF", "TSX", "CAD")
+
+    cache_file = tmp_path / "yfinance_cache.json"
+    data = json.loads(cache_file.read_text())
+    stale = datetime.now(timezone.utc) - timedelta(hours=25)
+    data["FAKE.TO"]["fetched_at"] = stale.isoformat()
+    cache_file.write_text(json.dumps(data))
+
+    svc2 = EtfLookthroughService(overrides=bundle, complex_flags={}, cache_dir=tmp_path)
+    svc2.classify("FAKE.TO", "ETF", "Fake ETF", "TSX", "CAD")
+    assert mock_ticker.call_count == 2
+
+
+def test_is_override_stale_helper(tmp_path):
+    from datetime import date, timedelta
+
+    bundle = SecurityOverrideBundle(stale_after_days=180, securities={})
+    svc = EtfLookthroughService(overrides=bundle, complex_flags={}, cache_dir=tmp_path)
+
+    fresh = date.today() - timedelta(days=30)
+    old = date.today() - timedelta(days=200)
+    assert svc.is_override_stale(fresh) is False
+    assert svc.is_override_stale(old) is True
+    assert svc.is_override_stale(None) is False
+
+
+def test_clear_symbols_evicts_only_listed_symbols(mocker, tmp_path, fake_funds_data):
+    mock_ticker = mocker.patch("networthlab.services.etf_lookthrough.yf.Ticker")
+    mock_ticker.return_value.funds_data = fake_funds_data
+
+    bundle = SecurityOverrideBundle(
+        stale_after_days=180,
+        securities={
+            "AAA.TO": SecurityOverride(
+                asset_class="provider", sector="provider",
+                geography={"US": Decimal("1.0")}, as_of=date(2026, 1, 1),
+            ),
+            "BBB.TO": SecurityOverride(
+                asset_class="provider", sector="provider",
+                geography={"US": Decimal("1.0")}, as_of=date(2026, 1, 1),
+            ),
+        },
+    )
+    svc = EtfLookthroughService(overrides=bundle, complex_flags={}, cache_dir=tmp_path)
+    svc.classify("AAA.TO", "ETF", "AAA", "TSX", "CAD")
+    svc.classify("BBB.TO", "ETF", "BBB", "TSX", "CAD")
+    assert mock_ticker.call_count == 2
+
+    svc.clear_symbols(["AAA.TO"])
+    svc.classify("AAA.TO", "ETF", "AAA", "TSX", "CAD")
+    svc.classify("BBB.TO", "ETF", "BBB", "TSX", "CAD")
+    assert mock_ticker.call_count == 3
