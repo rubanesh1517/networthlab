@@ -2015,7 +2015,7 @@ def test_etf_geography_listing_exchange_NOT_used_as_fallback(mocker, tmp_path):
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `pytest tests/test_etf_lookthrough.py -v`
-Expected: the 4 new tests fail; the previous 8 still pass.
+Expected: the 4 new geography-fallback tests fail; the previous 15 still pass.
 
 - [ ] **Step 3: Implement geography fallbacks**
 
