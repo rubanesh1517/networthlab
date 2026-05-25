@@ -74,7 +74,8 @@ The pure-aggregation boundary at `ExposureService` is the primary unit-test surf
 networthlab/
   config/
     account_groups.example.yaml      # template, committed
-    security_overrides.yaml          # generic market metadata, committed
+    security_overrides.example.yaml  # generic curated coverage, committed
+                                     # (user-specific file lives at ~/.networthlab/, not in repo)
     complex_securities.yaml          # generic market metadata, committed
   docs/
     superpowers/specs/
@@ -101,8 +102,11 @@ networthlab/
         concentration_bars.py
   tests/
     fixtures/
-      positions_sample.json          # sanitized real get_identity_positions response
-      yfinance_veqt.json             # sanitized yfinance fixture
+      positions_sample.json          # synthetic get_identity_positions-shaped payload
+                                     # (placeholder symbols/account IDs, not real portfolio)
+      yfinance_fundoffunds.json      # synthetic funds_data — fund-of-funds branch
+      yfinance_singleregion.json     # synthetic funds_data — single-region ETF branch
+      yfinance_stockholding.json     # synthetic funds_data — top_holdings are stocks
     test_exposure_service.py
     test_etf_lookthrough.py
     test_account_grouping.py
@@ -201,7 +205,7 @@ All in `networthlab/models/exposure.py`.
 ```python
 from dataclasses import dataclass
 from decimal import Decimal
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 
 Dimension = Literal["asset_class","geography","sector","concentration","currency","account"]
@@ -311,7 +315,7 @@ Each dimension is classified independently. The fallback chain differs per dimen
 ### 6.3 Step definitions
 
 ```
-1. Direct override (config/security_overrides.yaml merged with
+1. Direct override (config/security_overrides.example.yaml merged with
    ~/.networthlab/security_overrides.yaml; user file wins per-symbol)
    • Per-dimension. A literal `provider` value in the YAML falls through
      to step 2 for that dimension only; other dimensions still use override.
@@ -355,7 +359,7 @@ Each dimension is classified independently. The fallback chain differs per dimen
 - yfinance calls are made only for symbols actually held by the user as direct positions:
   - One `Ticker(symbol).funds_data` call per unique ETF symbol
   - One `Ticker(symbol).info` call per unique non-ETF stock symbol (sector only)
-- All yfinance results cached to `~/.networthlab/yfinance_cache.json` with 24h TTL keyed by `(symbol, fetched_at)`.
+- All yfinance results cached to `~/.networthlab/yfinance_cache.json`, keyed by symbol; the entry's `fetched_at` timestamp drives the 24h TTL.
 - **No yfinance call for individual stocks held *within* ETFs** — those are classified by listing exchange via the top_holdings metadata returned from the parent ETF's funds_data call.
 - No recursive look-through in MVP (deferred — see §15).
 - Cold-start budget: <5s for a 30-position portfolio. Subsequent loads <500ms.
@@ -471,7 +475,7 @@ Single reusable in-page modal (Reflex `rx.dialog`, `components/exposure/drilldow
 | Keyring session missing/expired | Banner: "Run `lunchsimple login` to connect." Page body hidden. |
 | `ws_api` network failure | Toast error + render `positions_cache.json` snapshot if any; "stale by Xm" badge on KPI bar. |
 | `yfinance` failure for one symbol | That symbol marked unclassified on affected dimensions; other tiles render normally; yellow chip on affected tiles. |
-| All `yfinance` calls fail | Fall back to exchange-based heuristics only; warning banner. |
+| All `yfinance` calls fail | Geography for ETFs still works via name-pattern + stock-exchange-aggregation when top_holdings is cached; otherwise geography falls back to listing exchange. Asset class and sector are sourced from overrides where available, otherwise marked unclassified. Warning banner shown. |
 | Empty portfolio | Empty state: "No positions found in your Wealthsimple accounts." |
 | YAML parse error | Banner with file path + parser exception message; page falls back to no-config defaults. |
 | Missing `account_groups.yaml` | Banner linking to `config/account_groups.example.yaml`; all accounts grouped as "Other". |
@@ -536,7 +540,7 @@ Unit tests for the pure-aggregation surface and for the look-through algorithm.
   - HHI calculation correctness
 - **`EtfLookthroughService`** (mock yfinance + YAML):
   - Direct override precedence over provider data
-  - Missing yfinance fields → partial classification with proper source marker
+  - Missing yfinance fields → `source="unclassified"`, `buckets={}`, descriptive entry appended to `notes`; rest of pipeline does not raise
   - Name-pattern fallback hits ("S&P 500" → US)
   - Stock-exchange aggregation when top_holdings are stocks
   - 24h cache TTL behavior (within → hit, beyond → refetch)
