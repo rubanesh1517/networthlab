@@ -960,7 +960,7 @@ def load_complex_securities(path: Path) -> dict[str, ComplexSecurityFlag]:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_exposure_config.py -v`
-Expected: all tests pass (the 11 tests defined above).
+Expected: all 14 tests pass (the original 11 plus 3 YAML parse-error tests).
 
 - [ ] **Step 5: Commit**
 
@@ -2153,7 +2153,7 @@ Add the staleness helper:
 - [ ] **Step 4: Run all tests to verify they pass**
 
 Run: `pytest tests/test_etf_lookthrough.py -v`
-Expected: all 15 tests pass.
+Expected: all 16 tests pass (the 15 plus `test_clear_symbols_evicts_only_listed_symbols`).
 
 - [ ] **Step 5: Commit**
 
@@ -2539,7 +2539,7 @@ class WealthsimpleService:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_wealthsimple_service.py -v`
-Expected: 5 passed.
+Expected: 6 passed (4 originally listed plus 2 includeSecurity-related regression tests).
 
 - [ ] **Step 5: Commit**
 
@@ -3094,15 +3094,26 @@ class ExposureState(rx.State):
     drilldown_bucket: str = ""
     drilldown_rows: list[dict[str, Any]] = []
 
-    # Chip state
+    # Page-level chip state (portfolio-wide signals)
     has_leverage: bool = False
-    has_unclassified: bool = False
-    has_stale_overrides: bool = False
     has_review_complex: bool = False
+
+    # Per-tile chip lists. Each entry is a chip type string:
+    # "unclassified", "stale_override", "leverage", "review_complex".
+    asset_class_chips: list[str] = []
+    geography_chips: list[str] = []
+    sector_chips: list[str] = []
+    currency_chips: list[str] = []
+    concentration_chips: list[str] = []
+    account_chips: list[str] = []
 
     # Empty / config gating
     is_empty: bool = False
     needs_account_config: bool = False
+
+    # Drilldown sort state (spec §9.4: sortable)
+    drilldown_sort_key: str = "value_cad_num"
+    drilldown_sort_desc: bool = True
 
     # Raw contributions (kept for drilldown filtering)
     _contributions: list[dict[str, Any]] = []
@@ -3125,9 +3136,6 @@ class ExposureState(rx.State):
             self.auth_required = True
             self.error_message = str(exc)
             self.is_empty = False
-        except ValueError as exc:
-            # Raised by config loaders on YAML parse errors with file path included.
-            self.error_message = f"Config error: {exc}"
         except Exception as exc:  # noqa: BLE001
             self.error_message = f"Unexpected error: {exc!s}"
         finally:
@@ -3137,23 +3145,47 @@ class ExposureState(rx.State):
         ws_svc = WealthsimpleService(cache_dir=USER_CONFIG_DIR)
         result: PositionsResult = ws_svc.fetch_positions()
 
-        bundle = load_security_overrides(
-            CONFIG_DIR / "security_overrides.example.yaml",
-            USER_CONFIG_DIR / "security_overrides.yaml",
-        )
-        complex_flags = load_complex_securities(CONFIG_DIR / "complex_securities.yaml")
+        # Each config load is independent — a malformed YAML in one file MUST NOT
+        # take down the whole page (spec §10: parse error -> banner + no-config defaults).
+        config_warnings: list[str] = []
 
-        # Spec §10: missing ~/.networthlab/account_groups.yaml -> "all Other"
-        # with a banner pointing to the example. Do NOT silently fall back to
-        # the committed example — that would mask the user's lack of config.
+        try:
+            bundle = load_security_overrides(
+                CONFIG_DIR / "security_overrides.example.yaml",
+                USER_CONFIG_DIR / "security_overrides.yaml",
+            )
+        except ValueError as exc:
+            config_warnings.append(str(exc))
+            # Try the committed example alone, then empty as last resort.
+            try:
+                bundle = load_security_overrides(
+                    CONFIG_DIR / "security_overrides.example.yaml", None
+                )
+            except ValueError:
+                from networthlab.services.exposure_config import SecurityOverrideBundle
+                bundle = SecurityOverrideBundle(stale_after_days=180, securities={})
+
+        try:
+            complex_flags = load_complex_securities(CONFIG_DIR / "complex_securities.yaml")
+        except ValueError as exc:
+            config_warnings.append(str(exc))
+            complex_flags = {}
+
         user_groups_path = USER_CONFIG_DIR / "account_groups.yaml"
-        account_rules = load_account_groups(user_groups_path)
+        try:
+            account_rules = load_account_groups(user_groups_path)
+        except ValueError as exc:
+            config_warnings.append(str(exc))
+            account_rules = []
+
         self.needs_account_config = not account_rules
         if self.needs_account_config:
-            result.warnings.append(
+            config_warnings.append(
                 f"No {user_groups_path} — all accounts shown as 'Other'. "
                 f"Copy config/account_groups.example.yaml to {user_groups_path} and edit."
             )
+
+        result.warnings.extend(config_warnings)
 
         lookup = EtfLookthroughService(
             overrides=bundle,
@@ -3197,17 +3229,8 @@ class ExposureState(rx.State):
             snap.contributions, "concentration", top_n=10
         )
 
-        # Chips
+        # Portfolio-level (global) chips — signals that apply to the whole snapshot.
         self.has_leverage = any(cls.complexity_flag for cls in classifications.values())
-        self.has_unclassified = bool(
-            [r for r in snap.contributions if r.source == "unclassified"]
-        )
-        self.has_stale_overrides = any(
-            lookup.is_override_stale(cls.geography.as_of)
-            or lookup.is_override_stale(cls.asset_class.as_of)
-            or lookup.is_override_stale(cls.sector.as_of)
-            for cls in classifications.values()
-        )
         # Spec §9.5 yellow "Review complex" chip: stockPosition > 1.0 (which our
         # normalizer collapses into buckets["equity"] > 1.0) AND symbol not in
         # complex_securities.yaml. Flags unknown leveraged/derivative structures.
@@ -3217,16 +3240,58 @@ class ExposureState(rx.State):
             for cls in classifications.values()
         )
 
+        # Per-tile chips (spec §9.5: warning chips appear inline on tiles).
+        # Each list contains chip type strings consumed by _chip_strip() in the page.
+        def _dim_has_unclassified(dim: str) -> bool:
+            return any(r.dimension == dim and r.source == "unclassified" for r in snap.contributions)
+
+        def _dim_has_stale_override(dim_attr: str) -> bool:
+            # Only meaningful for dimensions that can come from override
+            # (asset_class, sector, geography). currency/concentration/account are derived.
+            return any(
+                getattr(cls, dim_attr).source == "override"
+                and lookup.is_override_stale(getattr(cls, dim_attr).as_of)
+                for cls in classifications.values()
+            )
+
+        self.asset_class_chips = (
+            (["unclassified"] if _dim_has_unclassified("asset_class") else [])
+            + (["stale_override"] if _dim_has_stale_override("asset_class") else [])
+        )
+        self.geography_chips = (
+            (["unclassified"] if _dim_has_unclassified("geography") else [])
+            + (["stale_override"] if _dim_has_stale_override("geography") else [])
+        )
+        self.sector_chips = (
+            (["unclassified"] if _dim_has_unclassified("sector") else [])
+            + (["stale_override"] if _dim_has_stale_override("sector") else [])
+        )
+        self.currency_chips = (
+            ["unclassified"] if _dim_has_unclassified("currency") else []
+        )
+        self.concentration_chips = (
+            ["unclassified"] if _dim_has_unclassified("concentration") else []
+        )
+        # Account tile flags missing user config (everything bucketed as "Other").
+        self.account_chips = (
+            ["unclassified"]
+            if (_dim_has_unclassified("account") or self.needs_account_config)
+            else []
+        )
+
         # Empty-state gate
         self.is_empty = len(result.positions) == 0
 
         # Cache contributions for drilldown — pre-format display strings so the
-        # UI does not need raw rx.Var JS expressions.
+        # UI does not need raw rx.Var JS expressions; also keep numeric values
+        # for sortable columns.
         self._contributions = [
             {
                 **r.model_dump(mode="json"),
                 "value_cad_fmt": f"${float(r.value_cad):,.2f}",
                 "weight_pct": f"{float(r.weight) * 100:.2f}%",
+                "value_cad_num": float(r.value_cad),
+                "weight_num": float(r.weight),
             }
             for r in snap.contributions
         ]
@@ -3256,18 +3321,35 @@ class ExposureState(rx.State):
         self.drilldown_bucket = bucket
         self.drilldown_open = True
         if bucket:
-            self.drilldown_rows = [
+            rows = [
                 r for r in self._contributions
                 if r["dimension"] == dimension and r["bucket"] == bucket
             ]
         else:
-            self.drilldown_rows = [
-                r for r in self._contributions if r["dimension"] == dimension
-            ]
+            rows = [r for r in self._contributions if r["dimension"] == dimension]
+        # Default sort: highest value first.
+        self.drilldown_sort_key = "value_cad_num"
+        self.drilldown_sort_desc = True
+        self.drilldown_rows = sorted(
+            rows, key=lambda r: r["value_cad_num"], reverse=True
+        )
 
     def close_drilldown(self) -> None:
         self.drilldown_open = False
         self.drilldown_rows = []
+
+    def set_drilldown_sort(self, key: str) -> None:
+        """Toggle sort direction if the same column is clicked; otherwise sort desc by new key."""
+        if self.drilldown_sort_key == key:
+            self.drilldown_sort_desc = not self.drilldown_sort_desc
+        else:
+            self.drilldown_sort_key = key
+            self.drilldown_sort_desc = True
+        self.drilldown_rows = sorted(
+            self.drilldown_rows,
+            key=lambda r: r.get(key, ""),
+            reverse=self.drilldown_sort_desc,
+        )
 
 
 def _aggregate_for_chart(
@@ -3768,6 +3850,24 @@ def _row(row: rx.Var) -> rx.Component:
     )
 
 
+def _sortable_header(label: str, sort_key: str) -> rx.Component:
+    """Column header that toggles sort on click. Shows ↑/↓ when active."""
+    is_active = ExposureState.drilldown_sort_key == sort_key
+    return rx.table.column_header_cell(
+        rx.hstack(
+            rx.text(label, font_weight="600"),
+            rx.cond(
+                is_active,
+                rx.text(rx.cond(ExposureState.drilldown_sort_desc, "↓", "↑")),
+                rx.fragment(),
+            ),
+            spacing="1",
+            cursor="pointer",
+            on_click=ExposureState.set_drilldown_sort(sort_key),
+        )
+    )
+
+
 def drilldown_modal() -> rx.Component:
     return rx.dialog.root(
         rx.dialog.content(
@@ -3776,12 +3876,12 @@ def drilldown_modal() -> rx.Component:
                 rx.table.root(
                     rx.table.header(
                         rx.table.row(
-                            rx.table.column_header_cell("Bucket"),
-                            rx.table.column_header_cell("Position"),
-                            rx.table.column_header_cell("Account"),
-                            rx.table.column_header_cell("Value (CAD)"),
-                            rx.table.column_header_cell("Weight"),
-                            rx.table.column_header_cell("Source"),
+                            _sortable_header("Bucket", "bucket"),
+                            _sortable_header("Position", "source_position"),
+                            _sortable_header("Account", "source_account_id"),
+                            _sortable_header("Value (CAD)", "value_cad_num"),
+                            _sortable_header("Weight", "weight_num"),
+                            _sortable_header("Source", "source"),
                         )
                     ),
                     rx.table.body(
@@ -3859,14 +3959,32 @@ def _empty_state() -> rx.Component:
     )
 
 
-def _global_chips() -> rx.Component:
+def _chip_strip(chip_types) -> rx.Component:
+    """Render per-tile chip list. Each chip type maps to a chip component."""
     return rx.hstack(
-        rx.cond(ExposureState.has_unclassified, unclassified_chip(), rx.fragment()),
+        rx.foreach(
+            chip_types,
+            lambda t: rx.match(
+                t,
+                ("unclassified", unclassified_chip()),
+                ("leverage", leverage_chip()),
+                ("review_complex", review_complex_chip()),
+                ("stale_override", stale_override_chip()),
+                rx.fragment(),
+            ),
+        ),
+        spacing="1",
+    )
+
+
+def _page_chips() -> rx.Component:
+    """Portfolio-level chips (apply to the whole snapshot, not a single tile)."""
+    return rx.hstack(
         rx.cond(ExposureState.has_leverage, leverage_chip(), rx.fragment()),
         rx.cond(ExposureState.has_review_complex, review_complex_chip(), rx.fragment()),
-        rx.cond(ExposureState.has_stale_overrides, stale_override_chip(), rx.fragment()),
         rx.cond(
-            ExposureState.cache_stale_minutes > 0,
+            # Spec §9.5: "Stale data" chip triggers when cache_stale_minutes > 60.
+            ExposureState.cache_stale_minutes > 60,
             stale_cache_chip(ExposureState.cache_stale_minutes),
             rx.fragment(),
         ),
@@ -3876,28 +3994,35 @@ def _global_chips() -> rx.Component:
 
 
 def _grid() -> rx.Component:
-    tile_args = [
+    tile_specs = [
         ("Asset Class", "asset_class",
-         allocation_donut_simple(ExposureState.asset_class_data, height=220)),
+         allocation_donut_simple(ExposureState.asset_class_data, height=220),
+         ExposureState.asset_class_chips),
         ("Geography", "geography",
-         allocation_donut_simple(ExposureState.geography_data, height=220)),
+         allocation_donut_simple(ExposureState.geography_data, height=220),
+         ExposureState.geography_chips),
         ("Sector", "sector",
-         sector_bars(ExposureState.sector_data, height=240)),
+         sector_bars(ExposureState.sector_data, height=240),
+         ExposureState.sector_chips),
         ("Position Concentration", "concentration",
-         concentration_bars(ExposureState.concentration_data, height=260)),
+         concentration_bars(ExposureState.concentration_data, height=260),
+         ExposureState.concentration_chips),
         ("Currency", "currency",
-         allocation_donut_simple(ExposureState.currency_data, height=220)),
+         allocation_donut_simple(ExposureState.currency_data, height=220),
+         ExposureState.currency_chips),
         ("Account Groups", "account",
-         sector_bars(ExposureState.account_data, height=240)),
+         sector_bars(ExposureState.account_data, height=240),
+         ExposureState.account_chips),
     ]
     return rx.grid(
         *[
             exposure_tile(
                 title=title,
                 chart=chart,
+                chips=_chip_strip(chips),
                 on_click=lambda dim=dim: ExposureState.open_drilldown(dim, ""),
             )
-            for title, dim, chart in tile_args
+            for title, dim, chart, chips in tile_specs
         ],
         columns=rx.breakpoints(initial="1", sm="2", lg="3"),
         gap="14px",
@@ -3946,7 +4071,7 @@ def _body() -> rx.Component:
             _empty_state(),
             rx.fragment(
                 kpi_bar(),
-                _global_chips(),
+                _page_chips(),
                 _grid(),
                 drilldown_modal(),
             ),
