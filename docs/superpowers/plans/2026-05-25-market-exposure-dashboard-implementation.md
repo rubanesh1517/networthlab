@@ -1249,7 +1249,9 @@ def _unclassified(notes: list[str] | None = None) -> DimensionBreakdown:
 
 
 # Float drift below this is treated as "essentially 1.0" — no normalization.
-_WEIGHT_DRIFT_TOLERANCE = Decimal("0.005")
+# 0.001 catches publisher rounding (e.g., VEQT geography 1.003) while ignoring
+# yfinance's float-precision noise (~1e-6).
+_WEIGHT_DRIFT_TOLERANCE = Decimal("0.001")
 
 
 def _normalize_buckets(
@@ -1312,8 +1314,6 @@ def _override_breakdown(
     if isinstance(dim_value, dict):
         buckets = {k: Decimal(str(v)) for k, v in dim_value.items()}
         notes: list[str] = []
-        # _normalize_buckets is defined in Task 5; this helper lives in the
-        # same module so the forward reference is resolved at call time.
         buckets = _normalize_buckets(buckets, notes, preserve_excess=preserve_excess)
         return DimensionBreakdown(
             buckets=buckets,
@@ -2252,7 +2252,7 @@ def test_clear_symbols_evicts_only_listed_symbols(mocker, tmp_path, fake_funds_d
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `pytest tests/test_etf_lookthrough.py -v`
-Expected: the 3 new tests fail.
+Expected: the 4 new tests fail (cache avoidance, TTL refetch, is_override_stale, clear_symbols).
 
 - [ ] **Step 3: Implement the cache + staleness helper**
 
@@ -3653,8 +3653,17 @@ class ExposureState(rx.State):
         )
 
     def close_drilldown(self) -> None:
+        """Explicit no-arg Close button handler."""
         self.drilldown_open = False
         self.drilldown_rows = []
+
+    def set_drilldown_open(self, is_open: bool) -> None:
+        """Bound to rx.dialog.root(on_open_change=...). Reflex passes the new
+        open-state as the first positional arg; mirror it into state and clean
+        rows on close."""
+        self.drilldown_open = is_open
+        if not is_open:
+            self.drilldown_rows = []
 
     def set_drilldown_sort(self, key: str) -> None:
         """Toggle sort direction if the same column is clicked; otherwise sort desc by new key."""
@@ -4213,7 +4222,7 @@ def drilldown_modal() -> rx.Component:
             background=COLORS["bg_primary"],
         ),
         open=ExposureState.drilldown_open,
-        on_open_change=ExposureState.close_drilldown,
+        on_open_change=ExposureState.set_drilldown_open,
     )
 ```
 
