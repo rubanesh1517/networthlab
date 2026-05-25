@@ -144,45 +144,41 @@ Unmatched accounts fall into "Other" with a yellow chip prompting the user to ad
 
 A committed `config/account_groups.example.yaml` documents the structure with placeholder values only.
 
-### 4.2 `config/security_overrides.yaml` (committed, generic)
+### 4.2 Security overrides
 
-Direct per-symbol classification override. Pre-populated for the user's current holdings; extensible.
+Two-file pattern, identical in shape to account groups. **Both files use the same schema; the user file takes precedence per-symbol.**
+
+- **`config/security_overrides.example.yaml`** (committed, generic) — broad curated coverage of common Canadian-traded ETFs (Vanguard CA all-in-ones, iShares CA all-in-ones, popular US-listed ETFs). Generic market metadata, not user-specific.
+- **`~/.networthlab/security_overrides.yaml`** (user-specific, NOT committed) — optional, layered on top of the example file. Symbols in the user file override symbols in the example file; symbols only in one file pass through.
+
+**Schema:**
 
 ```yaml
-VEQT.TO:
-  asset_class:  { equity: 1.0 }
-  sector:       provider              # use yfinance
-  geography:    { US: 0.448, CAN: 0.306, INTL_DEV: 0.177, EM: 0.072 }
-  as_of: "2026-05-24"
+stale_after_days: 180        # top-level: override-staleness threshold
 
-XEQT.TO:
-  asset_class:  { equity: 1.0 }
-  sector:       provider
-  geography:    { US: 0.442, CAN: 0.258, INTL_DEV: 0.246, EM: 0.054 }
-  as_of: "2026-05-24"
+securities:                  # nested map: symbol → classification
+  VEQT.TO:
+    asset_class:  { equity: 1.0 }
+    sector:       provider              # literal "provider" → fall through to yfinance
+    geography:    { US: 0.448, CAN: 0.306, INTL_DEV: 0.177, EM: 0.072 }
+    as_of: "2026-05-24"
 
-VFV.TO:
-  asset_class:  { equity: 1.0 }
-  sector:       provider
-  geography:    { US: 1.0 }
-  as_of: "2026-05-24"
+  XEQT.TO:
+    asset_class:  { equity: 1.0 }
+    sector:       provider
+    geography:    { US: 0.442, CAN: 0.258, INTL_DEV: 0.246, EM: 0.054 }
+    as_of: "2026-05-24"
 
-QQQM:
-  asset_class:  { equity: 1.0 }
-  sector:       provider
-  geography:    { US: 1.0 }
-  as_of: "2026-05-24"
-
-HYLD.TO:
-  asset_class:  { equity: 1.0 }    # leverage flagged separately
-  sector:       provider
-  geography:    { US: 1.0 }
-  as_of: "2026-05-24"
+  VFV.TO:
+    asset_class:  { equity: 1.0 }
+    sector:       provider
+    geography:    { US: 1.0 }
+    as_of: "2026-05-24"
 ```
 
 The literal `provider` value means "use yfinance for this dimension." Allows mixing override + provider data per dimension within a single symbol.
 
-**Staleness:** When `as_of` is older than `stale_after_days` (default **180**, configurable via top-level YAML key `stale_after_days:`), the UI shows a gray "review override" chip on tiles containing that security.
+**Staleness:** When a symbol's `as_of` is older than `stale_after_days` (default **180**, configurable per file), the UI shows a gray "review override" chip on tiles containing that security. If both files define `stale_after_days`, the user file wins.
 
 ### 4.3 `config/complex_securities.yaml` (committed, generic)
 
@@ -236,9 +232,10 @@ class ClassificationComponent:
 
 @dataclass(frozen=True)
 class DimensionBreakdown:
-    buckets: dict[str, Decimal]   # bucket name → weight (sums to 1.0)
+    buckets: dict[str, Decimal]   # bucket name → weight (sums to 1.0). Empty when source=unclassified.
     source: ClassificationSource  # how this dimension was classified
-    as_of: date | None            # for source=override; None otherwise
+    as_of: date | None            # for source=override (day-precision from YAML); None otherwise
+    notes: list[str]              # diagnostic warnings (e.g., "weights summed to 0.97; remainder assigned to 'other'")
 
 @dataclass(frozen=True)
 class SecurityClassification:
@@ -249,7 +246,7 @@ class SecurityClassification:
     currency:    DimensionBreakdown
     complexity_flag: str | None       # "covered_call_leverage", etc.
     components: list[ClassificationComponent]   # phase 2 will populate beyond [self]
-    fetched_at: date
+    fetched_at: datetime              # timezone-aware UTC; drives 24h cache TTL
 
 @dataclass(frozen=True)
 class ContributionRow:
@@ -266,10 +263,14 @@ class ContributionRow:
 class Kpis:
     total_value_cad: Decimal
     position_count: int
-    hhi: int                    # 0–10,000, single-name concentration
-    top_holding_weight: Decimal # 0.0–1.0
-    as_of_snapshot: date
-    cache_stale_minutes: int    # for "stale by Xm" badge
+    hhi_positions: int          # 0–10,000, POSITION concentration (Σ weight²×10,000)
+                                # MVP measures position-level concentration. True single-name HHI
+                                # (looking through ETFs to underlying stocks) is a Phase 2 item;
+                                # see §15.
+    top_holding_weight: Decimal # 0.0–1.0, weight of the largest single position
+    as_of_snapshot: datetime    # timezone-aware UTC; when the snapshot was assembled
+    cache_stale_minutes: int    # for "stale by Xm" badge (derived from positions_cache mtime
+                                # when live fetch failed; 0 when fresh)
 
 @dataclass(frozen=True)
 class ExposureSnapshot:
@@ -285,9 +286,11 @@ class ExposureSnapshot:
 
 ---
 
-## 6. ETF look-through algorithm
+## 6. Classification algorithm
 
-Each dimension is classified independently. The fallback chain differs per dimension because not every step is meaningful for every dimension.
+Each dimension is classified independently. The fallback chain differs per dimension and per security kind (ETF vs non-ETF), because not every step is meaningful in every case.
+
+### 6.1 ETF positions
 
 | Dimension | Fallback chain |
 |---|---|
@@ -296,18 +299,33 @@ Each dimension is classified independently. The fallback chain differs per dimen
 | `geography` | override → name-pattern → stock-exchange aggregation → unclassified |
 | `currency` | derived directly from `Position.listing_currency` — does not use this algorithm |
 
-**Step definitions:**
+### 6.2 Non-ETF positions (individual equities, crypto)
+
+| Dimension | Source |
+|---|---|
+| `asset_class` | inferred from WS `security_type` — EQUITY → `{equity: 1.0}`, CRYPTO → `{crypto: 1.0}`, BOND → `{bond: 1.0}`, etc. **No yfinance call.** |
+| `sector` | override → yfinance stock-level `info["sector"]` if present → unclassified. One `Ticker(symbol).info` lookup per stock, cached 24h. |
+| `geography` | override → listing exchange → country (NASDAQ→US, TSX→CAN, etc.). **No yfinance call.** |
+| `currency` | from `Position.listing_currency` |
+
+### 6.3 Step definitions
 
 ```
-1. Direct override (config/security_overrides.yaml)
+1. Direct override (config/security_overrides.yaml merged with
+   ~/.networthlab/security_overrides.yaml; user file wins per-symbol)
    • Per-dimension. A literal `provider` value in the YAML falls through
      to step 2 for that dimension only; other dimensions still use override.
    • Carries `as_of` date → staleness chip (180-day default).
 
-2. Provider data (yfinance.Ticker(symbol).funds_data)
-   • Applies to: asset_class, sector.
-   • Normalized via EtfLookthroughService; missing fields marked
-     unavailable rather than crashing.
+2. Provider data
+   • For ETFs: yfinance.Ticker(symbol).funds_data
+     (asset_classes, sector_weightings).
+   • For non-ETF equities: yfinance.Ticker(symbol).info["sector"].
+   • Normalized via EtfLookthroughService → DimensionBreakdown. If the
+     yfinance field is missing/malformed, the dimension's
+     `source = "unclassified"` and `buckets = {}`. Diagnostic warnings
+     (e.g., "weights summed to 0.97") are appended to
+     DimensionBreakdown.notes.
 
 3. Name-pattern fallback (geography only; case-insensitive substring
    match against the security's full name field, e.g., "Vanguard
@@ -318,7 +336,7 @@ Each dimension is classified independently. The fallback chain differs per dimen
    • "Emerging Markets"                  → EM
    • "World", "Global"                   → no match, falls through
 
-4. Stock-exchange aggregation (geography only)
+4. Stock-exchange aggregation (geography, ETF only)
    • Applies only when top_holdings are predominantly individual stocks
      (heuristic: ≥80% of top_holdings have yfinance `quoteType` of
      EQUITY, not ETF/MUTUALFUND).
@@ -327,18 +345,22 @@ Each dimension is classified independently. The fallback chain differs per dimen
    • Example: QQQM top_holdings are all NASDAQ → 100% US.
 
 5. Unclassified
+   • DimensionBreakdown(buckets={}, source="unclassified", as_of=None, notes=[...]).
    • Position contributes to the "Unclassified" bucket on the affected
      dimension's tile.
    • Yellow warning chip on that tile.
 ```
 
 **Performance guardrails:**
-- One yfinance call per *unique ETF symbol*, cached to `~/.networthlab/yfinance_cache.json` with 24h TTL keyed by `(symbol, fetched_date)`.
-- For individual stocks within ETFs: exchange-based heuristic, **no yfinance call**.
+- yfinance calls are made only for symbols actually held by the user as direct positions:
+  - One `Ticker(symbol).funds_data` call per unique ETF symbol
+  - One `Ticker(symbol).info` call per unique non-ETF stock symbol (sector only)
+- All yfinance results cached to `~/.networthlab/yfinance_cache.json` with 24h TTL keyed by `(symbol, fetched_at)`.
+- **No yfinance call for individual stocks held *within* ETFs** — those are classified by listing exchange via the top_holdings metadata returned from the parent ETF's funds_data call.
 - No recursive look-through in MVP (deferred — see §15).
 - Cold-start budget: <5s for a 30-position portfolio. Subsequent loads <500ms.
 
-**yfinance normalization:** `EtfLookthroughService` never returns raw yfinance objects. It returns `SecurityClassification` with `partial=True`/`unavailable=True` markers per dimension when yfinance data is missing or malformed.
+**yfinance normalization:** `EtfLookthroughService` never returns raw yfinance objects. It returns `SecurityClassification` whose `DimensionBreakdown.source = "unclassified"` with `buckets = {}` when yfinance data is missing; diagnostic warnings (rounding mismatches, partial-data signals) are appended to `DimensionBreakdown.notes`.
 
 ---
 
@@ -405,7 +427,7 @@ UI re-renders 2×3 grid from derived @rx.vars
 │  ◐ Bond 0%           │  ◐ CAN 24%         │  Fin     ▓▓ 18%    │
 │  ◐ Cash 3%           │  ◐ Intl 13%        │  …                 │
 ├────────────────────────────────────────────────────────────────┤
-│  Concentration       │  Currency          │  Account Groups    │
+│  Position Concentration │ Currency        │  Account Groups    │
 │  VEQT  ▓▓▓▓▓ 21%     │  ◐ CAD 60%         │  Retirement   39%  │
 │  VFV   ▓▓▓ 16%       │  ◐ USD 40%         │  Tax Free     27%  │
 │  HHI: 1,420          │                    │  …                 │
@@ -428,7 +450,7 @@ Each tile is `components/exposure/exposure_tile.py`. Common shell:
 
 ### 9.4 Drill-down modal
 
-Single reusable in-page modal (Reflex `rx.dialog`, `components/exposure/drilldown_modal.py`) serves all 6 dimensions; no route change. Opens on tile click with the dimension preset. Sortable table of `ContributionRow` filtered by `(dimension, bucket)` — columns: Bucket, Position, Account, Value (CAD), Weight (%), Source. Concentration tile drills into the top **10** holdings by default with a "show all" expander.
+Single reusable in-page modal (Reflex `rx.dialog`, `components/exposure/drilldown_modal.py`) serves all 6 dimensions; no route change. Opens on tile click with the dimension preset. Sortable table of `ContributionRow` filtered by `(dimension, bucket)` — columns: Bucket, Position, Account, Value (CAD), Weight (%), Source. Position-concentration tile drills into the top **10 positions** by default with a "show all" expander. (Position-level — true underlying-stock concentration is Phase 2.)
 
 ### 9.5 Chips
 
@@ -532,8 +554,8 @@ Unit tests for the pure-aggregation surface and for the look-through algorithm.
 
 ### 13.3 Fixtures
 
-- `tests/fixtures/positions_sample.json` — one sanitized real `get_identity_positions` response covering the user's 5 ETFs + 2-3 individual stocks + at least one CRYPTO position
-- `tests/fixtures/yfinance_veqt.json`, `yfinance_qqqm.json` — captured `funds_data` responses for the unit tests
+- `tests/fixtures/positions_sample.json` — a synthetic `get_identity_positions`-shaped response with representative positions chosen to exercise the algorithm: at least one fund-of-funds ETF, one single-region index ETF, one single-stock-holdings ETF, one leveraged/complex ETF, one individual equity, and one CRYPTO position. Symbols and account IDs are placeholders, not real portfolio data.
+- `tests/fixtures/yfinance_fundoffunds.json`, `yfinance_singleregion.json`, `yfinance_stockholding.json` — synthetic `funds_data`-shaped payloads exercising each ETF branch. Synthetic, not captured from any specific ticker.
 
 No UI tests (Reflex + recharts is declarative; manual visual check during dev).
 
