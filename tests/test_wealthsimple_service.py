@@ -137,12 +137,54 @@ def test_fetch_positions_paginates_and_disables_aggregation(mocker, tmp_path):
     variables = call.args[1]
     assert variables["first"] == 100
     assert variables["aggregated"] is False
-    # currencyOverride forces per-position totalValue conversion to CAD.
-    # Without it, USD-listed positions come back at their USD amount and
-    # get silently misread as CAD in the dashboard (~$20K under-counting
-    # in the RRSP tile on a real portfolio).
-    assert variables["currencyOverride"] == "CAD"
+    # NOTE: WS rejects currencyOverride='CAD' as UNPROCESSABLE_ENTITY, so we
+    # don't pass it here — USD→CAD conversion happens client-side via
+    # _to_cad() using a yfinance-fetched spot rate.
+    assert "currencyOverride" not in variables
     assert call.kwargs.get("load_all_pages") is True
+
+
+def test_normalize_positions_converts_usd_totalvalue_to_cad():
+    """USD totalValue gets multiplied by the FX rate; CAD passes through."""
+    from networthlab.services.wealthsimple import WealthsimpleService
+
+    accounts = [
+        {"id": "a1", "unifiedAccountType": "RRSP", "nickname": "R"},
+    ]
+    edges = [
+        # USD position: 100 USD * 1.37 = 137.00 CAD
+        {"node": {
+            "accounts": [{"id": "a1"}],
+            "quantity": "1",
+            "totalValue": {"amount": "100", "currency": "USD"},
+            "marketBookValue": {"amount": "80", "currency": "USD"},
+            "security": {
+                "id": "sec-aapl", "currency": "USD", "securityType": "EQUITY",
+                "stock": {"symbol": "AAPL", "name": "Apple",
+                          "primaryExchange": "NASDAQ"},
+            },
+        }},
+        # CAD position: 200 CAD stays 200 CAD
+        {"node": {
+            "accounts": [{"id": "a1"}],
+            "quantity": "2",
+            "totalValue": {"amount": "200", "currency": "CAD"},
+            "marketBookValue": {"amount": "180", "currency": "CAD"},
+            "security": {
+                "id": "sec-veqt", "currency": "CAD", "securityType": "ETF",
+                "stock": {"symbol": "VEQT", "name": "Vanguard",
+                          "primaryExchange": "TSX"},
+            },
+        }},
+    ]
+    positions = WealthsimpleService._normalize_positions(
+        edges, accounts, usd_cad_rate=Decimal("1.37")
+    )
+    by_symbol = {p.symbol: p for p in positions}
+    assert by_symbol["AAPL"].market_value_cad == Decimal("137.00")
+    assert by_symbol["AAPL"].book_value_cad == Decimal("109.60")
+    assert by_symbol["VEQT.TO"].market_value_cad == Decimal("200")
+    assert by_symbol["VEQT.TO"].book_value_cad == Decimal("180")
 
 
 def test_fetch_positions_dedupes_account_symbol_pairs(mocker, tmp_path):

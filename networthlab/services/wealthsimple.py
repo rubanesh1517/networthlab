@@ -43,6 +43,34 @@ _YFINANCE_SUFFIX_BY_EXCHANGE: dict[str, str] = {
 }
 
 
+_USD_CAD_FALLBACK = Decimal("1.37")  # used when yfinance is unreachable
+
+
+def _fetch_usd_cad_rate() -> Decimal:
+    """One yfinance hit per refresh for the spot USD/CAD rate.
+
+    Returns a recent-history fallback (~1.37) when yfinance is unreachable
+    so the dashboard still renders rather than crashing the refresh.
+    """
+    try:
+        import yfinance as yf  # local import to keep cold-start lean
+
+        hist = yf.Ticker("USDCAD=X").history(period="1d")
+        if not hist.empty:
+            return Decimal(str(float(hist["Close"].iloc[-1])))
+    except Exception:
+        pass
+    return _USD_CAD_FALLBACK
+
+
+def _to_cad(amount: str, currency: str, usd_cad_rate: Decimal) -> Decimal:
+    """Convert a (amount, currency) pair from WS to CAD using the FX rate."""
+    value = Decimal(str(amount))
+    if currency and currency.upper() == "USD":
+        return value * usd_cad_rate
+    return value
+
+
 def _normalize_symbol(raw_symbol: str, listing_exchange: str) -> str:
     """Append the yfinance-style exchange suffix when the WS-returned symbol
     is bare (no dot). Leaves any already-suffixed symbol (e.g. "QQC.F",
@@ -105,11 +133,6 @@ class WealthsimpleService:
                 {
                     "identityId": api.get_token_info().get("identity_canonical_id"),
                     "currency": "CAD",
-                    # currencyOverride controls per-position totalValue
-                    # conversion — without it WS returns each position's
-                    # native-currency value (USD for NASDAQ/NYSE listings)
-                    # which then gets misread as CAD downstream.
-                    "currencyOverride": "CAD",
                     "filter": {"securityIds": None},
                     "first": 100,
                     "aggregated": False,
@@ -120,6 +143,11 @@ class WealthsimpleService:
                 "array",
                 load_all_pages=True,
             )
+            # USD/CAD spot rate so we can convert USD totalValue locally —
+            # WS's currencyOverride enum doesn't accept "CAD" as a value
+            # (UNPROCESSABLE_ENTITY), so totalValue stays in native currency
+            # and we convert here.
+            usd_cad_rate = _fetch_usd_cad_rate()
         except (ManualLoginRequired, LoginFailedException) as exc:
             # Spec §10: surface auth banner, hide page body; NOT cache fallback.
             raise WealthsimpleAuthError(
@@ -129,13 +157,15 @@ class WealthsimpleService:
         except Exception as exc:
             return self._render_from_cache(reason=f"WS API failed: {exc!s}")
 
-        positions = self._normalize_positions(edges, accounts)
+        positions = self._normalize_positions(edges, accounts, usd_cad_rate)
         self._write_cache(positions)
         return PositionsResult(positions=positions, stale_minutes=0, warnings=[])
 
     @staticmethod
     def _normalize_positions(
-        edges: list[dict], accounts: list[dict]
+        edges: list[dict],
+        accounts: list[dict],
+        usd_cad_rate: Decimal,
     ) -> list[Position]:
         accounts_by_id = {acct["id"]: acct for acct in accounts}
         # WS occasionally returns the same (account, security) pair more than
@@ -157,9 +187,16 @@ class WealthsimpleService:
             symbol = _normalize_symbol(raw_symbol, listing_exchange)
             name = stock.get("name") or symbol
 
-            value = (node.get("totalValue") or {}).get("amount", "0")
-            book = (node.get("marketBookValue") or {}).get("amount", "0")
+            # totalValue / marketBookValue come back in the position's
+            # NATIVE currency (WS rejects currencyOverride='CAD' as
+            # UNPROCESSABLE_ENTITY). Convert USD → CAD client-side using
+            # the live FX rate.
+            tv = node.get("totalValue") or {}
+            mbv = node.get("marketBookValue") or {}
             qty = node.get("quantity") or "0"
+
+            value_cad = _to_cad(tv.get("amount", "0"), tv.get("currency", "CAD"), usd_cad_rate)
+            book_cad = _to_cad(mbv.get("amount", "0"), mbv.get("currency", "CAD"), usd_cad_rate)
 
             account_ids = [a["id"] for a in (node.get("accounts") or [])]
             if not account_ids:
@@ -180,8 +217,8 @@ class WealthsimpleService:
                     listing_currency=listing_currency,
                     listing_exchange=listing_exchange,
                     quantity=Decimal(str(qty)),
-                    market_value_cad=Decimal(str(value)),
-                    book_value_cad=Decimal(str(book)),
+                    market_value_cad=value_cad,
+                    book_value_cad=book_cad,
                 )
         return list(deduped.values())
 
