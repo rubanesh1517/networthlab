@@ -214,7 +214,8 @@ def test_normalize_cash_synthesizes_one_position_per_account():
     )
     by_acct = {p.account_id: p for p in positions}
     assert len(positions) == 3  # empty-1 skipped
-    assert by_acct["tfsa-1"].market_value_cad == Decimal("13.71") + Decimal("1409.48") * Decimal("1.37")
+    expected_tfsa = Decimal("13.71") + Decimal("1409.48") * Decimal("1.37")
+    assert by_acct["tfsa-1"].market_value_cad == expected_tfsa
     assert by_acct["rrsp-1"].symbol == "CASH"
     assert by_acct["rrsp-1"].security_type == "CASH"
     # Negative margin balance flows through as debt:
