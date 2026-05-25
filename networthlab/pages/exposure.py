@@ -2,8 +2,8 @@
 
 import reflex as rx
 
-from ..components.charts.allocation_chart import allocation_donut_simple
 from ..components.exposure.charts.concentration_bars import concentration_bars
+from ..components.exposure.charts.exposure_donut import exposure_donut
 from ..components.exposure.charts.sector_bars import sector_bars
 from ..components.exposure.chips import (
     leverage_chip,
@@ -82,10 +82,10 @@ def _chip_strip(chip_types) -> rx.Component:
 def _grid() -> rx.Component:
     tile_specs = [
         ("Asset Class", "asset_class",
-         allocation_donut_simple(ExposureState.asset_class_data, height=220),
+         exposure_donut(ExposureState.asset_class_data, height=220),
          ExposureState.asset_class_chips),
         ("Geography", "geography",
-         allocation_donut_simple(ExposureState.geography_data, height=220),
+         exposure_donut(ExposureState.geography_data, height=220),
          ExposureState.geography_chips),
         ("Sector", "sector",
          sector_bars(ExposureState.sector_data, height=240),
@@ -94,7 +94,7 @@ def _grid() -> rx.Component:
          concentration_bars(ExposureState.concentration_data, height=260),
          ExposureState.concentration_chips),
         ("Currency", "currency",
-         allocation_donut_simple(ExposureState.currency_data, height=220),
+         exposure_donut(ExposureState.currency_data, height=220),
          ExposureState.currency_chips),
         ("Account Groups", "account",
          sector_bars(ExposureState.account_data, height=240),

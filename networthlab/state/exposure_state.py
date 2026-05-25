@@ -246,11 +246,19 @@ class ExposureState(rx.State):
 
     @rx.var
     def formatted_total_value_cad(self) -> str:
-        return f"${self.total_value_cad:,.0f} CAD"
+        return f"${self.total_value_cad:,.2f}"
 
     @rx.var
     def formatted_top_holding_pct(self) -> str:
-        return f"{self.top_holding_weight * 100:.1f}%"
+        return f"{self.top_holding_weight * 100:.2f}%"
+
+    @rx.var
+    def formatted_hhi(self) -> str:
+        return f"{self.hhi_positions:,}"
+
+    @rx.var
+    def formatted_holdings(self) -> str:
+        return f"{self.position_count}"
 
     @rx.var
     def concentration_label(self) -> str:
@@ -259,6 +267,10 @@ class ExposureState(rx.State):
     @rx.var
     def concentration_color(self) -> str:
         return "#f59e0b" if self.hhi_positions > 2500 else "#10b981"
+
+    @rx.var
+    def last_updated_subtitle(self) -> str:
+        return f"Updated {self.last_updated}" if self.last_updated else "Not yet synced"
 
     def open_drilldown(self, dimension: str, bucket: str = "") -> None:
         self.drilldown_dimension = dimension
