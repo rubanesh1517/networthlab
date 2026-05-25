@@ -422,3 +422,134 @@ def test_provider_asset_class_above_one_preserves_leverage(mocker, tmp_path):
     result = svc.classify("LEV.TO", "ETF", "Lev", "TSX", "CAD")
     assert result.asset_class.buckets["equity"] == Decimal("1.24")
     assert "leverage preserved" in result.asset_class.notes[0]
+
+
+# --- Geography fallbacks (Task 6) -------------------------------------
+
+
+def test_geography_name_pattern_us(mocker, tmp_path):
+    """ETF whose name contains 'S&P 500' classifies as US."""
+
+    class EmptyFD:
+        sector_weightings = {}
+        asset_classes = {}
+
+        class TH:
+            def to_dict(self_inner):
+                return {}
+
+        top_holdings = TH()
+
+    mocker.patch("networthlab.services.etf_lookthrough.yf.Ticker").return_value.funds_data = EmptyFD()
+
+    svc = EtfLookthroughService(
+        overrides=SecurityOverrideBundle(stale_after_days=180, securities={}),
+        complex_flags={},
+        cache_dir=tmp_path,
+    )
+    result = svc.classify(
+        symbol="SPY",
+        security_type="ETF",
+        name="SPDR S&P 500 ETF Trust",
+        listing_exchange="NYSE",
+        listing_currency="USD",
+    )
+    assert result.geography.source == "heuristic"
+    assert result.geography.buckets == {"US": Decimal("1.0")}
+
+
+def test_geography_stock_exchange_aggregation(mocker, tmp_path):
+    """ETF whose top_holdings are predominantly NASDAQ-listed stocks => US."""
+
+    class FD:
+        sector_weightings = {}
+        asset_classes = {}
+
+        class TH:
+            def to_dict(self_inner):
+                return {
+                    "Holding Percent": {"NVDA": 0.10, "AAPL": 0.08, "MSFT": 0.07},
+                    "exchange": {"NVDA": "NASDAQ", "AAPL": "NASDAQ", "MSFT": "NASDAQ"},
+                    "quoteType": {"NVDA": "EQUITY", "AAPL": "EQUITY", "MSFT": "EQUITY"},
+                }
+
+        top_holdings = TH()
+
+    mocker.patch("networthlab.services.etf_lookthrough.yf.Ticker").return_value.funds_data = FD()
+
+    svc = EtfLookthroughService(
+        overrides=SecurityOverrideBundle(stale_after_days=180, securities={}),
+        complex_flags={},
+        cache_dir=tmp_path,
+    )
+    result = svc.classify(
+        symbol="MYSTERY_BASKET",
+        security_type="ETF",
+        name="Generic Quality Equity Basket",
+        listing_exchange="NEO",
+        listing_currency="USD",
+    )
+    assert result.geography.source == "heuristic"
+    assert "US" in result.geography.buckets
+    assert result.geography.buckets["US"] == Decimal("1.0")
+    assert "top_holdings" in (result.geography.notes[0] if result.geography.notes else "")
+
+
+def test_geography_non_etf_uses_listing_exchange(tmp_path):
+    """For individual stocks, geography is derived directly from listing_exchange."""
+    svc = EtfLookthroughService(
+        overrides=SecurityOverrideBundle(stale_after_days=180, securities={}),
+        complex_flags={},
+        cache_dir=tmp_path,
+        yfinance_disabled=True,
+    )
+    shop = svc.classify(
+        symbol="SHOP.TO",
+        security_type="EQUITY",
+        name="Shopify Inc",
+        listing_exchange="TSX",
+        listing_currency="CAD",
+    )
+    assert shop.geography.source == "heuristic"
+    assert shop.geography.buckets == {"CAN": Decimal("1.0")}
+
+    nvda = svc.classify(
+        symbol="NVDA",
+        security_type="EQUITY",
+        name="NVIDIA",
+        listing_exchange="NASDAQ",
+        listing_currency="USD",
+    )
+    assert nvda.geography.buckets == {"US": Decimal("1.0")}
+
+
+def test_etf_geography_listing_exchange_NOT_used_as_fallback(mocker, tmp_path):
+    """Per spec §10: ETF with no override / no provider / no name match / no top_holdings
+    must end up Unclassified — NOT default to its listing exchange country."""
+
+    class FD:
+        sector_weightings = {}
+        asset_classes = {}
+
+        class TH:
+            def to_dict(self_inner):
+                return {}
+
+        top_holdings = TH()
+
+    mocker.patch("networthlab.services.etf_lookthrough.yf.Ticker").return_value.funds_data = FD()
+
+    svc = EtfLookthroughService(
+        overrides=SecurityOverrideBundle(stale_after_days=180, securities={}),
+        complex_flags={},
+        cache_dir=tmp_path,
+    )
+    result = svc.classify(
+        symbol="MYSTERY.TO",
+        security_type="ETF",
+        name="Mystery Strategy Fund",
+        listing_exchange="TSX",
+        listing_currency="CAD",
+    )
+    assert result.geography.source == "unclassified"
+    assert result.geography.buckets == {}

@@ -68,6 +68,42 @@ _SECURITY_TYPE_ASSET_CLASS = {
     "OPTION": "option",
 }
 
+# Name-pattern -> country (geography, ETF only). First match wins.
+_NAME_PATTERNS: list[tuple[str, str]] = [
+    ("s&p 500", "US"),
+    ("total us", "US"),
+    ("us total", "US"),
+    ("nasdaq", "US"),
+    ("ftse canada", "CAN"),
+    ("tsx 60", "CAN"),
+    ("tsx composite", "CAN"),
+    ("eafe", "INTL_DEV"),
+    ("intl developed", "INTL_DEV"),
+    ("emerging markets", "EM"),
+]
+
+# Listing exchange -> country (used for non-ETF positions AND for
+# stock-exchange aggregation across an ETF's top_holdings).
+_EXCHANGE_COUNTRY: dict[str, str] = {
+    "NASDAQ": "US",
+    "NYSE": "US",
+    "AMEX": "US",
+    "BATS": "US",
+    "ARCA": "US",
+    "NMS": "US",
+    "TSX": "CAN",
+    "TSXV": "CAN",
+    "NEO": "CAN",
+    "LSE": "INTL_DEV",
+    "TYO": "INTL_DEV",
+    "FRA": "INTL_DEV",
+    "ASX": "INTL_DEV",
+    "HKEX": "EM",
+    "SSE": "EM",
+    "BSE": "EM",
+    "NSE": "EM",
+}
+
 
 def _normalize_buckets(
     buckets: dict[str, Decimal],
@@ -270,7 +306,68 @@ class EtfLookthroughService:
             ob = _override_breakdown(override.geography, override.as_of, preserve_excess=False)
             if ob:
                 return ob
-        return _unclassified(notes=["no override; geography fallbacks not implemented in this task"])
+
+        # Non-ETF: listing-exchange directly.
+        if not is_etf:
+            country = _EXCHANGE_COUNTRY.get(listing_exchange.upper())
+            if country:
+                return DimensionBreakdown(
+                    buckets={country: Decimal("1.0")},
+                    source="heuristic",
+                    as_of=None,
+                    notes=[f"from listing_exchange={listing_exchange}"],
+                )
+            return _unclassified(notes=[f"unknown listing_exchange={listing_exchange}"])
+
+        # ETF geography fallback chain.
+        if self.yfinance_disabled:
+            return _unclassified(notes=["yfinance disabled"])
+
+        # 1) Name-pattern.
+        name_lower = (name or "").lower()
+        for pattern, country in _NAME_PATTERNS:
+            if pattern in name_lower:
+                return DimensionBreakdown(
+                    buckets={country: Decimal("1.0")},
+                    source="heuristic",
+                    as_of=None,
+                    notes=[f"name matched '{pattern}'"],
+                )
+
+        # 2) Stock-exchange aggregation across top_holdings.
+        try:
+            fd = self._get_funds_data(symbol)
+            th = getattr(fd, "top_holdings", None)
+            raw = th.to_dict() if th is not None and hasattr(th, "to_dict") else {}
+        except Exception as exc:
+            return _unclassified(notes=[f"yfinance top_holdings error: {exc!s}"])
+
+        weights = raw.get("Holding Percent") or {}
+        exchanges = raw.get("exchange") or {}
+        quote_types = raw.get("quoteType") or {}
+
+        if weights:
+            stock_count = sum(1 for s, qt in quote_types.items() if str(qt).upper() == "EQUITY")
+            if quote_types and (stock_count / max(len(quote_types), 1)) >= 0.8:
+                buckets: dict[str, Decimal] = {}
+                for sub_symbol, pct in weights.items():
+                    ex = (exchanges.get(sub_symbol) or "").upper()
+                    country = _EXCHANGE_COUNTRY.get(ex)
+                    if country:
+                        buckets[country] = buckets.get(country, Decimal("0")) + Decimal(str(pct))
+                # Renormalize so weights sum to 1.0 (top_holdings may be partial).
+                total = sum(buckets.values())
+                if total > 0:
+                    buckets = {k: v / total for k, v in buckets.items()}
+                    return DimensionBreakdown(
+                        buckets=buckets,
+                        source="heuristic",
+                        as_of=None,
+                        notes=[f"aggregated {len(weights)} top_holdings by exchange"],
+                    )
+
+        # 3) No fallback to listing_exchange for ETFs (spec §10).
+        return _unclassified(notes=["ETF geography: no override/name/top_holdings match"])
 
     def _derive_currency(self, listing_currency: str) -> DimensionBreakdown:
         return DimensionBreakdown(
