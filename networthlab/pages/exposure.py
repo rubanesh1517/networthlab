@@ -126,7 +126,7 @@ def _grid() -> rx.Component:
                 title=title,
                 chart=chart,
                 chips=_chip_strip(chips),
-                on_click=lambda dim=dim: ExposureState.open_drilldown(dim, ""),
+                on_click=ExposureState.open_drilldown(dim, ""),
             )
             for title, dim, chart, chips in tile_specs
         ],
