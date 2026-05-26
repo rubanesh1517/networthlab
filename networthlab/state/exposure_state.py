@@ -97,6 +97,7 @@ class ExposureState(rx.State):
 
     # ETF Allocation KPI: share of invested portfolio held in funds.
     etf_share: float = 0.0
+    etf_value_cad: float = 0.0
     etf_count: int = 0
     individual_count: int = 0
 
@@ -282,6 +283,7 @@ class ExposureState(rx.State):
                 individual_count += 1
         self.etf_count = etf_count
         self.individual_count = individual_count
+        self.etf_value_cad = float(etf_value)
         self.etf_share = (
             float(etf_value / invested_value) if invested_value > 0 else 0.0
         )
@@ -331,8 +333,9 @@ class ExposureState(rx.State):
 
     @rx.var
     def etf_breakdown_subtitle(self) -> str:
-        # e.g. "14 ETFs · 47 stocks"
-        return f"{self.etf_count} ETFs · {self.individual_count} stocks"
+        # e.g. "$45,200 · 14 ETFs · 47 stocks"
+        value_fmt = _format_compact_currency(self.etf_value_cad)
+        return f"{value_fmt} · {self.etf_count} ETFs · {self.individual_count} stocks"
 
     def open_drilldown(self, dimension: str, bucket: str = "") -> None:
         self.drilldown_dimension = dimension
