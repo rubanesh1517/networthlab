@@ -1,51 +1,70 @@
-"""Horizontal bar chart for sector / account / currency breakdowns.
-
-Each bar gets its own colour from the palette and a value label at the
-end so the chart reads even before hovering.
-"""
+"""Compact horizontal bar list for sector and account breakdowns."""
 
 import reflex as rx
 
-from ....styles.theme import CHART_COLORS, COLORS
-from ._tooltip import currency_tooltip
+from ....styles.theme import COLORS
 
 
-def _palette_cells(n: int = 12) -> list[rx.Component]:
-    return [
-        rx.recharts.cell(fill=CHART_COLORS[i % len(CHART_COLORS)])
-        for i in range(n)
-    ]
+def _bar_row(row: rx.Var) -> rx.Component:
+    return rx.vstack(
+        rx.hstack(
+            rx.text(
+                row["name"],
+                font_size="12px",
+                color=COLORS["text_primary"],
+                overflow="hidden",
+                text_overflow="ellipsis",
+                white_space="nowrap",
+                title=row["name"],
+                flex="1",
+                min_width="0",
+            ),
+            rx.text(
+                row["percent_fmt"],
+                font_size="11px",
+                color=COLORS["text_secondary"],
+                width="48px",
+                text_align="right",
+                flex_shrink="0",
+            ),
+            rx.text(
+                row["value_fmt"],
+                font_size="12px",
+                font_weight="600",
+                color=COLORS["text_primary"],
+                width="76px",
+                text_align="right",
+                flex_shrink="0",
+            ),
+            spacing="2",
+            align="center",
+            width="100%",
+            min_width="0",
+        ),
+        rx.box(
+            rx.box(
+                width=row["bar_width"],
+                height="100%",
+                background=row["bar_color"],
+                border_radius="999px",
+            ),
+            width="100%",
+            height="6px",
+            background="rgba(255,255,255,0.06)",
+            border_radius="999px",
+            overflow="hidden",
+        ),
+        spacing="1",
+        width="100%",
+    )
 
 
 def sector_bars(data: rx.Var, height: int = 260) -> rx.Component:
-    return rx.recharts.bar_chart(
-        rx.recharts.bar(
-            *_palette_cells(12),
-            data_key="value",
-            radius=[0, 4, 4, 0],
-            label={
-                "position": "right",
-                "fill": COLORS["text_primary"],
-                "fontSize": 11,
-                "formatter": rx.Var(
-                    "(value) => '$' + Number(value).toLocaleString('en-US', "
-                    "{minimumFractionDigits: 2, maximumFractionDigits: 2})"
-                ),
-            },
-        ),
-        rx.recharts.x_axis(type_="number", hide=True),
-        rx.recharts.y_axis(
-            data_key="name",
-            type_="category",
-            width=160,
-            tick={"fill": COLORS["text_secondary"], "fontSize": 11},
-            axis_line=False,
-            tick_line=False,
-        ),
-        currency_tooltip(),
-        data=data,
-        layout="vertical",
-        height=height,
+    return rx.vstack(
+        rx.foreach(data, _bar_row),
+        spacing="3",
         width="100%",
-        margin={"top": 4, "right": 80, "left": 0, "bottom": 4},
+        height=f"{height}px",
+        overflow_y="auto",
+        padding_right="4px",
     )

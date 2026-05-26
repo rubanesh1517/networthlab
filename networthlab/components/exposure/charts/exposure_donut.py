@@ -1,10 +1,4 @@
-"""Multi-colour donut chart for the exposure tiles.
-
-The shared `allocation_donut_simple` uses a single fill, which leaves the
-chart looking like one giant slice. The exposure tiles need colour rotation
-across slices (matching the brainstorming mocks) plus a centred bucket count
-so the donut reads at a glance even when there are only a handful of values.
-"""
+"""Readable donut chart with a compact value legend."""
 
 import reflex as rx
 
@@ -12,52 +6,88 @@ from ....styles.theme import CHART_COLORS, COLORS
 from ._tooltip import currency_tooltip
 
 
-# Reuse the global palette but rotate so adjacent tiles do not start on the
-# same hue.  recharts requires concrete Cell components for per-slice fill.
 def _palette_cells(n: int = 8) -> list[rx.Component]:
-    return [
-        rx.recharts.cell(fill=CHART_COLORS[i % len(CHART_COLORS)])
-        for i in range(n)
-    ]
+    return [rx.recharts.cell(fill=CHART_COLORS[i % len(CHART_COLORS)]) for i in range(n)]
 
 
-def exposure_donut(data: rx.Var, height: int = 230) -> rx.Component:
-    """Donut where each slice rotates through the chart palette.
-
-    Slices below 3% have their labels suppressed to prevent visual collision
-    on the chart edge — the tooltip still shows the exact $ value on hover,
-    and the legend below the donut lists every bucket.
-    """
-    return rx.recharts.pie_chart(
-        rx.recharts.pie(
-            *_palette_cells(8),
-            data=data,
-            data_key="value",
-            name_key="name",
-            cx="50%",
-            cy="50%",
-            inner_radius="58%",
-            outer_radius="82%",
-            padding_angle=2,
-            stroke="none",
-            label=rx.Var(
-                "({name, percent}) => percent >= 0.03 "
-                "? name + '  ' + (percent * 100).toFixed(1) + '%' "
-                ": ''"
-            ),
-            # No leader lines — clean modern donut. The legend below the
-            # chart lists every bucket regardless of slice size, and tiny
-            # slices still surface their $ value on hover via the tooltip.
-            label_line=False,
+def _legend_row(row: rx.Var) -> rx.Component:
+    return rx.hstack(
+        rx.box(
+            width="8px",
+            height="8px",
+            border_radius="999px",
+            background=row["color"],
+            flex_shrink="0",
         ),
-        currency_tooltip(),
-        rx.recharts.legend(
-            layout="horizontal",
-            align="center",
-            vertical_align="bottom",
-            icon_type="circle",
-            wrapper_style={"fontSize": "11px", "paddingTop": "4px"},
+        rx.text(
+            row["name"],
+            font_size="12px",
+            color=COLORS["text_primary"],
+            overflow="hidden",
+            text_overflow="ellipsis",
+            white_space="nowrap",
+            title=row["name"],
+            flex="1",
+            min_width="0",
         ),
-        height=height,
+        rx.text(
+            row["percent_fmt"],
+            font_size="12px",
+            color=COLORS["text_secondary"],
+            width="52px",
+            text_align="right",
+            flex_shrink="0",
+        ),
+        rx.text(
+            row["value_fmt"],
+            font_size="12px",
+            font_weight="600",
+            color=COLORS["text_primary"],
+            width="78px",
+            text_align="right",
+            flex_shrink="0",
+        ),
+        spacing="2",
+        align="center",
         width="100%",
+        min_width="0",
+    )
+
+
+def exposure_donut(data: rx.Var, height: int = 250) -> rx.Component:
+    chart_height = max(height - 106, 150)
+    return rx.vstack(
+        rx.box(
+            rx.recharts.pie_chart(
+                rx.recharts.pie(
+                    *_palette_cells(8),
+                    data=data,
+                    data_key="chart_value",
+                    name_key="name",
+                    cx="50%",
+                    cy="50%",
+                    inner_radius="62%",
+                    outer_radius="82%",
+                    padding_angle=2,
+                    stroke=COLORS["bg_secondary"],
+                    stroke_width=2,
+                ),
+                currency_tooltip(),
+                height=chart_height,
+                width="100%",
+            ),
+            width="100%",
+            min_height=f"{chart_height}px",
+        ),
+        rx.vstack(
+            rx.foreach(data, _legend_row),
+            spacing="2",
+            width="100%",
+            max_height="108px",
+            overflow_y="auto",
+            padding_right="4px",
+        ),
+        spacing="2",
+        width="100%",
+        height=f"{height}px",
     )

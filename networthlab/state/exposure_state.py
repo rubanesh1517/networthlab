@@ -25,6 +25,30 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CONFIG_DIR = REPO_ROOT / "config"
 USER_CONFIG_DIR = Path.home() / ".networthlab"
 
+_CHART_PALETTE = [
+    "#8b5cf6",
+    "#3b82f6",
+    "#10b981",
+    "#f59e0b",
+    "#ef4444",
+    "#ec4899",
+    "#06b6d4",
+]
+_NEGATIVE_BAR_COLOR = "#f87171"
+_DISPLAY_BUCKET_NAMES = {
+    "CommunicationServices": "Communication Services",
+    "INTL_DEV": "Intl Dev",
+    "Realestate": "Real Estate",
+}
+
+# Security types we consider "fund-like" for the ETF Allocation KPI —
+# kept in sync with EtfLookthroughService._ETF_LIKE_SECURITY_TYPES.
+_ETF_LIKE_TYPES: set[str] = {"ETF", "EXCHANGE_TRADED_FUND", "MUTUAL_FUND"}
+# Cash positions are excluded from the ETF-vs-stock denominator so the
+# share reflects "of your invested portfolio" rather than getting diluted
+# by uninvested cash balances.
+_CASH_TYPES: set[str] = {"CASH"}
+
 
 class ExposureState(rx.State):
     is_loading: bool = False
@@ -71,6 +95,11 @@ class ExposureState(rx.State):
     show_all_concentration: bool = False
     total_concentration_count: int = 0
 
+    # ETF Allocation KPI: share of invested portfolio held in funds.
+    etf_share: float = 0.0
+    etf_count: int = 0
+    individual_count: int = 0
+
     _contributions: list[dict[str, Any]] = []
 
     async def on_load(self) -> None:
@@ -115,6 +144,7 @@ class ExposureState(rx.State):
                 )
             except ValueError:
                 from networthlab.services.exposure_config import SecurityOverrideBundle
+
                 bundle = SecurityOverrideBundle(stale_after_days=180, securities={})
 
         try:
@@ -188,8 +218,7 @@ class ExposureState(rx.State):
 
         def _dim_has_unclassified(dim: str) -> bool:
             return any(
-                r.dimension == dim and r.source == "unclassified"
-                for r in snap.contributions
+                r.dimension == dim and r.source == "unclassified" for r in snap.contributions
             )
 
         def _dim_has_stale_override(dim_attr: str) -> bool:
@@ -207,9 +236,7 @@ class ExposureState(rx.State):
         #     have nothing to do with leverage).
         #   - stale_cache reflects the whole-snapshot freshness; show on every
         #     tile so the user always sees it.
-        cache_stale_chip: list[str] = (
-            ["stale_cache"] if result.stale_minutes > 60 else []
-        )
+        cache_stale_chip: list[str] = ["stale_cache"] if result.stale_minutes > 60 else []
 
         def _build_chips(dim: str, dim_attr: str | None = None) -> list[str]:
             chips: list[str] = []
@@ -237,6 +264,27 @@ class ExposureState(rx.State):
         self.account_chips = account_chips
 
         self.is_empty = len(result.positions) == 0
+
+        # ETF Allocation KPI — funds vs individual securities, excluding cash.
+        etf_value = Decimal("0")
+        invested_value = Decimal("0")
+        etf_count = 0
+        individual_count = 0
+        for p in result.positions:
+            st = p.security_type.upper()
+            if st in _CASH_TYPES:
+                continue
+            invested_value += p.market_value_cad
+            if st in _ETF_LIKE_TYPES:
+                etf_value += p.market_value_cad
+                etf_count += 1
+            else:
+                individual_count += 1
+        self.etf_count = etf_count
+        self.individual_count = individual_count
+        self.etf_share = (
+            float(etf_value / invested_value) if invested_value > 0 else 0.0
+        )
 
         self._contributions = [
             {
@@ -277,6 +325,15 @@ class ExposureState(rx.State):
     def last_updated_subtitle(self) -> str:
         return f"Updated {self.last_updated}" if self.last_updated else "Not yet synced"
 
+    @rx.var
+    def formatted_etf_share(self) -> str:
+        return f"{self.etf_share * 100:.1f}%"
+
+    @rx.var
+    def etf_breakdown_subtitle(self) -> str:
+        # e.g. "14 ETFs · 47 stocks"
+        return f"{self.etf_count} ETFs · {self.individual_count} stocks"
+
     def open_drilldown(self, dimension: str, bucket: str = "") -> None:
         self.drilldown_dimension = dimension
         self.drilldown_bucket = bucket
@@ -284,7 +341,8 @@ class ExposureState(rx.State):
         self.show_all_concentration = False
         if bucket:
             rows = [
-                r for r in self._contributions
+                r
+                for r in self._contributions
                 if r["dimension"] == dimension and r["bucket"] == bucket
             ]
         else:
@@ -304,14 +362,10 @@ class ExposureState(rx.State):
         """Show-all button on the concentration drilldown — replaces the top-10
         slice with every concentration row, sorted by current sort key."""
         self.show_all_concentration = True
-        rows = [
-            r for r in self._contributions if r["dimension"] == "concentration"
-        ]
+        rows = [r for r in self._contributions if r["dimension"] == "concentration"]
         reverse = self.drilldown_sort_desc
         key = self.drilldown_sort_key
-        self.drilldown_rows = sorted(
-            rows, key=lambda r: r.get(key, ""), reverse=reverse
-        )
+        self.drilldown_rows = sorted(rows, key=lambda r: r.get(key, ""), reverse=reverse)
 
     def close_drilldown(self) -> None:
         self.drilldown_open = False
@@ -343,12 +397,42 @@ def _aggregate_for_chart(
     for row in contributions:
         if row.dimension != dimension:
             continue
-        sums[row.bucket] = sums.get(row.bucket, Decimal("0")) + row.value_cad
-    items = sorted(
-        ({"name": k, "value": float(v)} for k, v in sums.items()),
-        key=lambda item: item["value"],
-        reverse=True,
-    )
+        bucket = _display_bucket_name(row.bucket)
+        sums[bucket] = sums.get(bucket, Decimal("0")) + row.value_cad
+
+    raw_items = sorted(sums.items(), key=lambda item: item[1], reverse=True)
+    total = sum((float(v) for _, v in raw_items), 0.0)
     if top_n is not None:
-        items = items[:top_n]
+        raw_items = raw_items[:top_n]
+
+    max_abs = max((abs(float(v)) for _, v in raw_items), default=0.0)
+    items = []
+    for index, (name, value_decimal) in enumerate(raw_items):
+        value = float(value_decimal)
+        percent = value / total if total else 0.0
+        color = _CHART_PALETTE[index % len(_CHART_PALETTE)]
+        items.append(
+            {
+                "name": name,
+                "value": value,
+                "chart_value": max(value, 0.0),
+                "color": color,
+                "bar_color": _NEGATIVE_BAR_COLOR if value < 0 else color,
+                "bar_width": (f"{(abs(value) / max_abs * 100):.1f}%" if max_abs else "0%"),
+                "value_fmt": _format_compact_currency(value),
+                "percent_fmt": f"{percent * 100:.1f}%",
+            }
+        )
     return items
+
+
+def _format_compact_currency(value: float) -> str:
+    sign = "-" if value < 0 else ""
+    return f"{sign}${abs(value):,.0f}"
+
+
+def _display_bucket_name(name: str) -> str:
+    if name in _DISPLAY_BUCKET_NAMES:
+        return _DISPLAY_BUCKET_NAMES[name]
+    cleaned = name.replace("_", " ")
+    return cleaned.title() if cleaned.islower() else cleaned

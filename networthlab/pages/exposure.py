@@ -62,7 +62,7 @@ def _chip_strip(chip_types) -> rx.Component:
     portfolio-wide signals (leverage / review_complex / stale_cache) — the
     state populates them into every tile's chip list when applicable.
     """
-    return rx.hstack(
+    return rx.flex(
         rx.foreach(
             chip_types,
             lambda t: rx.match(
@@ -75,30 +75,50 @@ def _chip_strip(chip_types) -> rx.Component:
                 rx.fragment(),
             ),
         ),
-        spacing="1",
+        gap="6px",
+        wrap="wrap",
+        width="100%",
     )
 
 
 def _grid() -> rx.Component:
     tile_specs = [
-        ("Asset Class", "asset_class",
-         exposure_donut(ExposureState.asset_class_data, height=220),
-         ExposureState.asset_class_chips),
-        ("Geography", "geography",
-         exposure_donut(ExposureState.geography_data, height=220),
-         ExposureState.geography_chips),
-        ("Sector", "sector",
-         sector_bars(ExposureState.sector_data, height=240),
-         ExposureState.sector_chips),
-        ("Position Concentration", "concentration",
-         concentration_bars(ExposureState.concentration_data, height=260),
-         ExposureState.concentration_chips),
-        ("Currency", "currency",
-         exposure_donut(ExposureState.currency_data, height=220),
-         ExposureState.currency_chips),
-        ("Account Groups", "account",
-         sector_bars(ExposureState.account_data, height=240),
-         ExposureState.account_chips),
+        (
+            "Asset Class",
+            "asset_class",
+            exposure_donut(ExposureState.asset_class_data, height=252),
+            ExposureState.asset_class_chips,
+        ),
+        (
+            "Geography",
+            "geography",
+            exposure_donut(ExposureState.geography_data, height=252),
+            ExposureState.geography_chips,
+        ),
+        (
+            "Sector",
+            "sector",
+            sector_bars(ExposureState.sector_data, height=266),
+            ExposureState.sector_chips,
+        ),
+        (
+            "Position Concentration",
+            "concentration",
+            concentration_bars(ExposureState.concentration_data, height=266),
+            ExposureState.concentration_chips,
+        ),
+        (
+            "Currency",
+            "currency",
+            exposure_donut(ExposureState.currency_data, height=252),
+            ExposureState.currency_chips,
+        ),
+        (
+            "Account Groups",
+            "account",
+            sector_bars(ExposureState.account_data, height=266),
+            ExposureState.account_chips,
+        ),
     ]
     return rx.grid(
         *[
@@ -111,7 +131,7 @@ def _grid() -> rx.Component:
             for title, dim, chart, chips in tile_specs
         ],
         columns=rx.breakpoints(initial="1", sm="2", lg="3"),
-        gap="14px",
+        gap="16px",
         width="100%",
     )
 
@@ -120,18 +140,22 @@ def _warnings_banner() -> rx.Component:
     return rx.cond(
         ExposureState.warnings.length() > 0,
         rx.box(
-            rx.vstack(
-                rx.foreach(
-                    ExposureState.warnings,
-                    lambda w: rx.text(w, font_size="12px", color=COLORS["text_secondary"]),
+            rx.hstack(
+                rx.icon("triangle-alert", size=16, color="#fbbf24"),
+                rx.vstack(
+                    rx.foreach(
+                        ExposureState.warnings,
+                        lambda w: rx.text(w, font_size="12px", color=COLORS["text_secondary"]),
+                    ),
+                    spacing="1",
+                    align="start",
                 ),
-                spacing="1",
                 align="start",
             ),
-            padding="10px 14px",
-            background="rgba(245, 158, 11, 0.08)",
-            border_left="3px solid #f59e0b",
-            border_radius="6px",
+            padding="12px 14px",
+            background="rgba(245, 158, 11, 0.07)",
+            border="1px solid rgba(245, 158, 11, 0.18)",
+            border_radius="10px",
             margin_bottom="12px",
         ),
         rx.fragment(),
